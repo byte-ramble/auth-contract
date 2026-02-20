@@ -1,0 +1,17 @@
+{
+  "name": "@omniarb/auth-contract",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test --offline -vv",
+    "test:unit": "forge test --offline --match-path \"test/unit/*.t.sol\" -vv",
+    "test:security": "forge test --offline --match-path \"test/security/*.t.sol\" -vv",
+    "test:upgrade": "forge test --offline --match-path \"test/upgrade/*.t.sol\" -vv",
+    "test:fuzz": "forge test --offline --match-path \"test/fuzz/*.t.sol\" -vv",
+    "check:security": "npm run test:security && npm run test:upgrade && npm run test:fuzz",
+    "fmt": "forge fmt",
+    "fmt:check": "forge fmt --check",
+    "clean": "forge clean"
+  }
+}
