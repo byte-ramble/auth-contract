@@ -1,15 +1,15 @@
-# BSC Topic 权限合约运维文档（v1.0）
+# BSC Topic 权限合约运维文档（v1.1）
 
-关联文档：`./README.md`、`./00-doc-layout.md`、`./06-flowcharts.md`、`./03-implementation.md`、`./04-security-audit.md`
+关联文档：`../README.md`、`../governance/document-layout.md`、`../design/flowcharts.md`、`../design/storage-layout.md`、`../implementation/implementation-guide.md`、`../security/security-audit.md`、`../testing/ops-lifecycle-testing.md`
 
 ## 1. 目标
 - 提供可执行的部署、升级、迁移、回滚与应急 runbook。
-- 降低升级后配置遗漏（尤其稳定币注册）风险。
+- 降低升级后配置遗漏（尤其 payment token / trial 配置）风险。
 
 ## 1.1 流程图入口
-- 生命周期总流程：`06-flowcharts.md` 第 1 节
-- 升级与迁移流程：`06-flowcharts.md` 第 5 节
-- 应急暂停与恢复流程：`06-flowcharts.md` 第 6 节
+- 生命周期总流程：`../design/flowcharts.md` 第 1 节
+- 升级与迁移流程：`../design/flowcharts.md` 第 5 节
+- 应急暂停与恢复流程：`../design/flowcharts.md` 第 6 节
 
 ## 2. 角色分工
 - 运维执行人：按 runbook 执行命令与链上操作。
@@ -25,29 +25,53 @@
   - `BNB_USD_ORACLE`
   - `MAX_ORACLE_DELAY`
   - `PROXY_ADDRESS`（升级/迁移时）
+- 可选环境变量：
+  - `BSC_RPC_URL`（发布前执行真实链上 fork 验证时）
 - 推荐前置检查：
   - `npm run -w @omniarb/auth-contract fmt:check`
   - `npm run -w @omniarb/auth-contract test`
   - `npm run -w @omniarb/auth-contract check:security`
+  - `npm run -w @omniarb/auth-contract ci`
+  - `npm run -w @omniarb/auth-contract test:lifecycle`
 
 ## 4. 首次部署 Runbook
 1. 部署 proxy + implementation：
    - `forge script script/Deploy.s.sol --rpc-url <RPC> --broadcast`
-2. 部署后初始化配置（按业务需要）：
+2. 推荐的批量配置脚本：
+   - `forge script script/PostDeployConfigure.s.sol --rpc-url <RPC> --broadcast`
+   - 关键环境变量：
+     - `PROXY_ADDRESS`
+     - `CONFIGURE_BSC_PAYMENT_TOKENS=true|false`（默认 `true`）
+     - `GLOBAL_TRIAL_ENDS_AT`
+     - `TOPIC_TRIAL_KEYS=topic.a,topic.b`
+     - `TOPIC_TRIAL_ENDS_ATS=1735689600,1738291200`
+3. 部署后初始化配置（按业务需要）：
    - `setExecutors(executorA, executorB)`
-   - `setStableToken(stableToken, true)`（可重复调用添加多个）
+   - `setPaymentToken(token, true, usdOracle)`（非稳定币或希望显式绑定 oracle 的 token）
+   - `setStableToken(stableToken, true)`（1:1 USD 稳定币兼容入口，可重复调用添加多个）
+   - `setGlobalTrialEndsAt(trialEndsAt)` / `setTopicTrialEndsAt(topicId, trialEndsAt)`
    - `setRamblePair(pair)`（仅在需要覆盖默认常量时）
-3. 验证：
+   - `setTopicKey(topicId, topicKey)`（若 topic 通过 `createTopic` 创建）
+   - BSC 主网推荐样例：
+     - `WETH -> ETH/USD`
+     - `USDT -> USDT/USD`
+     - `USDC -> USDC/USD`
+     - `WBNB -> BNB/USD`
+     - `BTCB -> BTC/USD`
+4. 验证：
    - `getOracleConfig` 与配置一致
+   - `getPaymentTokenConfig(token)` 与预期一致
    - `getStableTokenConfig(token).enabled == true`
+   - `getGlobalTrialEndsAt/getTopicTrialEndsAt/getEffectiveTrialEndsAt` 与业务策略一致
    - `getRamblePair` 与预期一致
-   - `topup` 小额冒烟（BNB / 稳定币 / RAMBLE）
+   - `getTopicCount/getTopicAt/getTopicKey` 可读
+   - 使用带 `minEffectiveValueWad + deadline` 的 `topup` 做小额冒烟（BNB / payment token / RAMBLE）
 
 ## 5. 升级 Runbook（无迁移）
 1. 部署新实现并升级：
    - `forge script script/Upgrade.s.sol --rpc-url <RPC> --broadcast`
 2. 升级后验证：
-   - topic/expiry/whitelist 状态保持
+   - topic/expiry/whitelist/trial/payment token 状态保持
    - `hasAccess`、`topup`、`quote` 正常
    - `owner`、`executor` 权限边界不变
 
@@ -78,6 +102,8 @@
   - 根据 revert 原因修正后重试（幂等）。
 - 升级后稳定币未迁移：
   - 手动执行 `setStableToken(token, true)` 补齐。
+- 升级后 payment token / 试用期未配置：
+  - 手动执行 `setPaymentToken` / `setGlobalTrialEndsAt` / `setTopicTrialEndsAt` 补齐。
 - 回滚策略：
   - 通过 owner 将 proxy 升级到上一个已验证实现。
   - 回滚前后均执行最小回归（`hasAccess/topup/quote`）。
@@ -85,11 +111,17 @@
 ## 8. 日常运维检查
 - 配置一致性：
   - `getOracleConfig`、`getRamblePair`、`getRambleDiscountBps`
+  - `getPaymentTokenConfig` 是否符合业务 token 清单
+  - `getGlobalTrialEndsAt/getTopicTrialEndsAt/getEffectiveTrialEndsAt` 是否符合当前活动策略
+  - `getTopicCount/getTopicAt/getTopicKey` 与后台 topic 清单一致
   - 稳定币白名单是否符合业务清单
 - 风险监控：
   - Chainlink 数据是否 stale
   - RAMBLE Pair 储备是否异常下降
   - 合约余额与提取日志对账
+- 发布前建议：
+  - `BSC_RPC_URL=<RPC> npm run -w @omniarb/auth-contract test:fork`
+  - 若本机 Foundry 在 macOS 上因系统代理崩溃，改用 Linux CI 或无代理 shell 执行真实 fork
 - 应急措施：
   - 异常时 owner 执行 `pause()`
   - 完成排障后 `unpause()`

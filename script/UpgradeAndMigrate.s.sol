@@ -24,7 +24,7 @@ contract UpgradeAndMigrateScript {
         TopicAccessManagerUpgradeable impl = new TopicAccessManagerUpgradeable();
         TopicAccessManagerUpgradeable manager = TopicAccessManagerUpgradeable(proxyAddress);
 
-        manager.upgradeTo(address(impl));
+        manager.upgradeToAndCall(address(impl), "");
 
         (address legacyUsdc, address legacyUsdt) = manager.getLegacyStableTokens();
         _enableStableIfNeeded(manager, legacyUsdc);

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -13,6 +13,8 @@ import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 import "./interfaces/IAggregatorV3.sol";
 import "./interfaces/IPancakePairV2.sol";
+import "./libraries/RamblePricingLib.sol";
+import "./libraries/TopicAccessPolicyLib.sol";
 import "./libraries/WadScaleLib.sol";
 
 contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownable2Step, Pausable, ReentrancyGuard {
@@ -21,6 +23,13 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     struct Topic {
         bool exists;
         uint256 monthlyPriceWad;
+    }
+
+    struct PaymentTokenConfig {
+        bool enabled;
+        uint8 tokenDecimals;
+        address usdOracle;
+        uint8 oracleDecimals;
     }
 
     struct TopupCalc {
@@ -32,6 +41,8 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     uint256 public constant WAD = 1e18;
     uint256 public constant BPS_BASE = 10_000;
     uint256 public constant ONE_MONTH = 30 days;
+    uint256 public constant MAX_BATCH_SIZE = 200;
+    uint256 public constant BSC_CHAIN_ID = 56;
 
     address public constant RAMBLE_TOKEN = 0x1A8C391f6c603894108fcE14A52E9Bf804c67777;
     address public constant DEFAULT_RAMBLE_WBNB_PAIR = 0x185e706a55d04815e7e10b506A5a4d8d1153aeAD;
@@ -64,10 +75,21 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     address private _rambleWbnbPair;
     uint256 private _maxOracleDelay;
 
-    mapping(address => bool) private _stableTokenEnabled;
-    mapping(address => uint8) private _stableTokenDecimals;
+    mapping(address => bool) private _paymentTokenEnabled;
+    mapping(address => uint8) private _paymentTokenDecimals;
 
-    uint256[38] private __gap;
+    mapping(bytes32 => string) private _topicKeyById;
+    bytes32[] private _topicIds;
+    mapping(address => address) private _paymentTokenOracle;
+    mapping(address => uint8) private _paymentTokenOracleDecimals;
+    uint256 private _globalTrialEndsAt;
+    mapping(bytes32 => uint256) private _topicTrialEndsAt;
+    mapping(bytes32 => bool) private _topicPaymentAllowlistEnabled;
+    mapping(bytes32 => mapping(address => bool)) private _topicPaymentTokenAllowed;
+
+    mapping(bytes32 => bool) private _topicDeactivated;
+
+    uint256[29] private __gap;
 
     error ZeroAddress();
     error EmptyTopicKey();
@@ -78,24 +100,39 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     error UnsupportedPayToken(address payToken);
     error NativeValueMismatch(uint256 msgValue, uint256 amountIn);
     error UnexpectedNativeValue(uint256 msgValue);
+    error PaymentDeadlineExpired(uint256 deadline, uint256 nowTimestamp);
     error FreeTopicNoPaymentRequired(bytes32 topicId);
+    error TrialPeriodNoPaymentRequired(bytes32 topicId, uint256 trialEndsAt);
     error WhitelistedUserNoPaymentRequired(bytes32 topicId, address user);
     error MinimumPaymentNotMet(uint256 effectiveValueWad, uint256 monthlyPriceWad);
+    error EffectiveValueBelowMinimum(uint256 effectiveValueWad, uint256 minEffectiveValueWad);
     error InvalidDiscountBps(uint16 discountBps);
     error InvalidOracleConfig();
+    error InvalidOracle(address oracle);
+    error PaymentTokenOracleRequired(address token);
+    error PayTokenNotAllowedForTopic(bytes32 topicId, address payToken);
+    error RambleOnlySupportedOnBsc(uint256 chainId);
     error NotExecutor(address caller);
     error InvalidPrivilegedTarget(address target);
     error InvalidStableToken(address token);
+    error DurationZero();
     error OraclePriceInvalid();
     error OraclePriceStale(uint256 updatedAt, uint256 nowTimestamp, uint256 maxOracleDelay);
     error OracleRoundInvalid(uint80 roundId, uint80 answeredInRound);
+    error TopicKeyMismatch(bytes32 topicId, bytes32 derivedTopicId);
+    error TopicIndexOutOfBounds(uint256 index, uint256 count);
     error PairTokenMismatch(address token0, address token1, address ramble);
     error RamblePairNotConfigured(address pair);
     error PairLiquidityTooLow();
     error WrappedNativeWithdrawFailed(address wrappedNative);
     error QuoteUnavailable();
+    error RambleSlippageProtectionRequired();
+    error TopicIsDeactivated(bytes32 topicId);
+    error TopicAlreadyActive(bytes32 topicId);
+    error BatchSizeExceeded(uint256 provided, uint256 max);
 
     event TopicCreated(bytes32 indexed topicId, uint256 monthlyPriceWad);
+    event TopicKeyRegistered(bytes32 indexed topicId, string topicKey);
     event TopicPriceUpdated(bytes32 indexed topicId, uint256 newPriceWad);
     event WhitelistUpdated(bytes32 indexed topicId, address indexed user, bool isWhitelisted);
 
@@ -106,6 +143,14 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     event OracleConfigUpdated(address indexed oracle, uint256 maxOracleDelay);
 
     event StableTokenUpdated(address indexed token, bool enabled, uint8 decimals);
+    event PaymentTokenUpdated(
+        address indexed token, bool enabled, address indexed usdOracle, uint8 tokenDecimals, uint8 oracleDecimals
+    );
+    event GlobalTrialEndsAtUpdated(uint256 trialEndsAt);
+    event TopicTrialEndsAtUpdated(bytes32 indexed topicId, uint256 trialEndsAt);
+    event TopicPaymentAllowlistUpdated(bytes32 indexed topicId, bool enabled);
+    event TopicPaymentTokenUpdated(bytes32 indexed topicId, address indexed payToken, bool allowed);
+    event ExpiryUpdated(bytes32 indexed topicId, address indexed user, uint256 oldExpiry, uint256 newExpiry);
 
     event RamblePairUpdated(address indexed pair);
 
@@ -121,7 +166,10 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
 
     event PrivilegedCallExecuted(address indexed executor, address indexed target, uint256 value, bool success);
 
-    constructor() {
+    event TopicDeactivated(bytes32 indexed topicId);
+    event TopicReactivated(bytes32 indexed topicId);
+
+    constructor() Ownable(msg.sender) {
         _disableInitializers();
     }
 
@@ -162,6 +210,15 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     ) external onlyOwner {
         bytes32 topicId = _hashTopicKey(topicKey);
         _createTopic(topicId, monthlyPriceWad);
+        _registerTopicKey(topicId, topicKey);
+    }
+
+    function setTopicKey(
+        bytes32 topicId,
+        string calldata topicKey
+    ) external onlyOwner {
+        _requireTopic(topicId);
+        _registerTopicKey(topicId, topicKey);
     }
 
     function setTopicPrice(
@@ -172,6 +229,34 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         topic.monthlyPriceWad = newMonthlyPriceWad;
 
         emit TopicPriceUpdated(topicId, newMonthlyPriceWad);
+    }
+
+    function deactivateTopic(
+        bytes32 topicId
+    ) external onlyOwner {
+        _requireTopic(topicId);
+        if (_topicDeactivated[topicId]) {
+            revert TopicIsDeactivated(topicId);
+        }
+        _topicDeactivated[topicId] = true;
+        emit TopicDeactivated(topicId);
+    }
+
+    function reactivateTopic(
+        bytes32 topicId
+    ) external onlyOwner {
+        _requireTopic(topicId);
+        if (!_topicDeactivated[topicId]) {
+            revert TopicAlreadyActive(topicId);
+        }
+        _topicDeactivated[topicId] = false;
+        emit TopicReactivated(topicId);
+    }
+
+    function isTopicActive(
+        bytes32 topicId
+    ) external view returns (bool) {
+        return _topics[topicId].exists && !_topicDeactivated[topicId];
     }
 
     function setWhitelist(
@@ -195,6 +280,9 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         bool isWhitelisted_
     ) external onlyOwner {
         _requireTopic(topicId);
+        if (users.length > MAX_BATCH_SIZE) {
+            revert BatchSizeExceeded(users.length, MAX_BATCH_SIZE);
+        }
 
         uint256 len = users.length;
         for (uint256 i = 0; i < len; ++i) {
@@ -232,13 +320,84 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         address token,
         bool enabled
     ) external onlyOwner {
-        _setStableToken(token, enabled);
+        (uint8 tokenDecimals,) = _setPaymentToken(token, enabled, address(0), false);
+        emit StableTokenUpdated(token, enabled, tokenDecimals);
+    }
+
+    function setPaymentToken(
+        address token,
+        bool enabled,
+        address usdOracle
+    ) external onlyOwner {
+        _setPaymentToken(token, enabled, usdOracle, true);
     }
 
     function setRamblePair(
         address rambleWbnbPair_
     ) external onlyOwner {
         _setRamblePair(rambleWbnbPair_);
+    }
+
+    function setGlobalTrialEndsAt(
+        uint256 trialEndsAt
+    ) external onlyOwner {
+        _globalTrialEndsAt = trialEndsAt;
+        emit GlobalTrialEndsAtUpdated(trialEndsAt);
+    }
+
+    function setTopicTrialEndsAt(
+        bytes32 topicId,
+        uint256 trialEndsAt
+    ) external onlyOwner {
+        _requireTopic(topicId);
+        _topicTrialEndsAt[topicId] = trialEndsAt;
+        emit TopicTrialEndsAtUpdated(topicId, trialEndsAt);
+    }
+
+    function setTopicPaymentAllowlistEnabled(
+        bytes32 topicId,
+        bool enabled
+    ) external onlyOwner {
+        _requireTopic(topicId);
+        _topicPaymentAllowlistEnabled[topicId] = enabled;
+        emit TopicPaymentAllowlistUpdated(topicId, enabled);
+    }
+
+    function setTopicPaymentToken(
+        bytes32 topicId,
+        address payToken,
+        bool allowed
+    ) external onlyOwner {
+        _requireTopic(topicId);
+        _topicPaymentTokenAllowed[topicId][payToken] = allowed;
+        emit TopicPaymentTokenUpdated(topicId, payToken, allowed);
+    }
+
+    function setExpiry(
+        bytes32 topicId,
+        address user,
+        uint256 newExpiry
+    ) external onlyOwner {
+        _setExpiry(topicId, user, newExpiry);
+    }
+
+    function extendExpiry(
+        bytes32 topicId,
+        address user,
+        uint256 durationSeconds
+    ) external onlyOwner returns (uint256 newExpiry) {
+        if (durationSeconds == 0) {
+            revert DurationZero();
+        }
+
+        _requireTopic(topicId);
+        if (user == address(0)) {
+            revert ZeroAddress();
+        }
+
+        uint256 oldExpiry = _expiryByTopicUser[topicId][user];
+        newExpiry = TopicAccessPolicyLib.extendExpiry(oldExpiry, block.timestamp, durationSeconds);
+        _setExpiry(topicId, user, newExpiry);
     }
 
     function pause() external onlyOwner {
@@ -255,20 +414,49 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         uint256 amountIn,
         address beneficiary
     ) external payable whenNotPaused nonReentrant returns (uint256 newExpiry) {
+        return _topup(topicId, payToken, amountIn, beneficiary, 0, 0);
+    }
+
+    function topup(
+        bytes32 topicId,
+        address payToken,
+        uint256 amountIn,
+        address beneficiary,
+        uint256 minEffectiveValueWad,
+        uint256 deadline
+    ) external payable whenNotPaused nonReentrant returns (uint256 newExpiry) {
+        return _topup(topicId, payToken, amountIn, beneficiary, minEffectiveValueWad, deadline);
+    }
+
+    function _topup(
+        bytes32 topicId,
+        address payToken,
+        uint256 amountIn,
+        address beneficiary,
+        uint256 minEffectiveValueWad,
+        uint256 deadline
+    ) internal returns (uint256 newExpiry) {
         if (amountIn == 0) {
             revert AmountZero();
         }
         if (beneficiary == address(0)) {
             revert ZeroAddress();
         }
-
-        Topic storage topic = _requireTopic(topicId);
-        if (topic.monthlyPriceWad == 0) {
-            revert FreeTopicNoPaymentRequired(topicId);
+        if (deadline != 0 && block.timestamp > deadline) {
+            revert PaymentDeadlineExpired(deadline, block.timestamp);
         }
+
+        Topic storage topic = _requireActiveTopic(topicId);
         if (_whitelistByTopicUser[topicId][beneficiary]) {
             revert WhitelistedUserNoPaymentRequired(topicId, beneficiary);
         }
+        if (_isTrialActive(topicId)) {
+            revert TrialPeriodNoPaymentRequired(topicId, _getEffectiveTrialEndsAt(topicId));
+        }
+        if (topic.monthlyPriceWad == 0) {
+            revert FreeTopicNoPaymentRequired(topicId);
+        }
+        _requireTopicPaymentTokenAllowed(topicId, payToken);
 
         TopupCalc memory calc;
 
@@ -278,6 +466,10 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
             }
             calc.effectiveValueWad = _quoteBnbValueWad(amountIn);
         } else if (payToken == RAMBLE_TOKEN) {
+            _requireRamblePaymentSupported();
+            if (minEffectiveValueWad == 0) {
+                revert RambleSlippageProtectionRequired();
+            }
             if (msg.value != 0) {
                 revert UnexpectedNativeValue(msg.value);
             }
@@ -287,11 +479,14 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
             if (msg.value != 0) {
                 revert UnexpectedNativeValue(msg.value);
             }
-            (, calc.effectiveValueWad) = _previewPaymentValueWad(payToken, amountIn);
-            if (calc.effectiveValueWad < topic.monthlyPriceWad) {
-                revert MinimumPaymentNotMet(calc.effectiveValueWad, topic.monthlyPriceWad);
-            }
+            uint256 tokenBalanceBefore = IERC20(payToken).balanceOf(address(this));
             IERC20(payToken).safeTransferFrom(msg.sender, address(this), amountIn);
+            uint256 tokenAmountReceived = IERC20(payToken).balanceOf(address(this)) - tokenBalanceBefore;
+            (, calc.effectiveValueWad) = _previewPaymentValueWad(payToken, tokenAmountReceived);
+        }
+
+        if (minEffectiveValueWad != 0 && calc.effectiveValueWad < minEffectiveValueWad) {
+            revert EffectiveValueBelowMinimum(calc.effectiveValueWad, minEffectiveValueWad);
         }
 
         if (calc.effectiveValueWad < topic.monthlyPriceWad) {
@@ -299,8 +494,9 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         }
 
         calc.oldExpiry = _expiryByTopicUser[topicId][beneficiary];
-        uint256 secondsAdded = Math.mulDiv(calc.effectiveValueWad, ONE_MONTH, topic.monthlyPriceWad);
-        calc.newExpiry = Math.max(calc.oldExpiry, block.timestamp) + secondsAdded;
+        (calc.newExpiry,) = TopicAccessPolicyLib.computeNewExpiry(
+            calc.oldExpiry, block.timestamp, calc.effectiveValueWad, ONE_MONTH, topic.monthlyPriceWad
+        );
         _expiryByTopicUser[topicId][beneficiary] = calc.newExpiry;
         newExpiry = calc.newExpiry;
 
@@ -340,16 +536,14 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         address user
     ) public view returns (bool) {
         Topic storage topic = _topics[topicId];
-        if (!topic.exists) {
-            return false;
-        }
-        if (_whitelistByTopicUser[topicId][user]) {
-            return true;
-        }
-        if (topic.monthlyPriceWad == 0) {
-            return true;
-        }
-        return _expiryByTopicUser[topicId][user] >= block.timestamp;
+        return TopicAccessPolicyLib.hasAccess(
+            topic.exists,
+            _whitelistByTopicUser[topicId][user],
+            _getEffectiveTrialEndsAt(topicId),
+            topic.monthlyPriceWad,
+            _expiryByTopicUser[topicId][user],
+            block.timestamp
+        );
     }
 
     function topicExists(
@@ -368,15 +562,51 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         return _rambleDiscountBps;
     }
 
+    function getTopicCount() external view returns (uint256) {
+        return _topicIds.length;
+    }
+
+    function getTopicAt(
+        uint256 index
+    ) external view returns (bytes32 topicId, uint256 monthlyPriceWad, string memory topicKey, bool active) {
+        uint256 topicCount = _topicIds.length;
+        if (index >= topicCount) {
+            revert TopicIndexOutOfBounds(index, topicCount);
+        }
+
+        topicId = _topicIds[index];
+        monthlyPriceWad = _topics[topicId].monthlyPriceWad;
+        topicKey = _topicKeyById[topicId];
+        active = !_topicDeactivated[topicId];
+    }
+
+    function getTopicKey(
+        bytes32 topicId
+    ) external view returns (string memory topicKey) {
+        _requireTopic(topicId);
+        topicKey = _topicKeyById[topicId];
+    }
+
     function getExecutors() external view returns (address executorA, address executorB) {
         return (_executorA, _executorB);
+    }
+
+    function getPaymentTokenConfig(
+        address token
+    ) external view returns (bool enabled, uint8 tokenDecimals, address usdOracle, uint8 oracleDecimals) {
+        PaymentTokenConfig memory config = _getPaymentTokenConfig(token);
+        enabled = config.enabled;
+        tokenDecimals = config.tokenDecimals;
+        usdOracle = config.usdOracle;
+        oracleDecimals = config.oracleDecimals;
     }
 
     function getStableTokenConfig(
         address token
     ) external view returns (bool enabled, uint8 decimals) {
-        enabled = _stableTokenEnabled[token];
-        decimals = _stableTokenDecimals[token];
+        PaymentTokenConfig memory config = _getPaymentTokenConfig(token);
+        enabled = config.enabled;
+        decimals = config.tokenDecimals;
     }
 
     function getLegacyStableTokens() external view returns (address legacyUsdc, address legacyUsdt) {
@@ -388,6 +618,39 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         return (_bnbUsdOracle, _maxOracleDelay);
     }
 
+    function getGlobalTrialEndsAt() external view returns (uint256) {
+        return _globalTrialEndsAt;
+    }
+
+    function getTopicTrialEndsAt(
+        bytes32 topicId
+    ) external view returns (uint256) {
+        _requireTopic(topicId);
+        return _topicTrialEndsAt[topicId];
+    }
+
+    function getEffectiveTrialEndsAt(
+        bytes32 topicId
+    ) external view returns (uint256) {
+        _requireTopic(topicId);
+        return _getEffectiveTrialEndsAt(topicId);
+    }
+
+    function getTopicPaymentAllowlistEnabled(
+        bytes32 topicId
+    ) external view returns (bool) {
+        _requireTopic(topicId);
+        return _topicPaymentAllowlistEnabled[topicId];
+    }
+
+    function isTopicPaymentTokenAllowed(
+        bytes32 topicId,
+        address payToken
+    ) external view returns (bool) {
+        _requireTopic(topicId);
+        return _isTopicPaymentTokenAllowed(topicId, payToken);
+    }
+
     function getRamblePair() external view returns (address) {
         return _rambleWbnbPair;
     }
@@ -395,68 +658,68 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     function quoteMinBnbForOneMonth(
         bytes32 topicId
     ) external view returns (uint256 minBnbWei) {
-        Topic storage topic = _requireTopic(topicId);
-        if (topic.monthlyPriceWad == 0) {
+        Topic storage topic = _requireActiveTopic(topicId);
+        if (_isNoPaymentRequired(topicId, topic.monthlyPriceWad)) {
             return 0;
         }
+        _requireTopicPaymentTokenAllowed(topicId, address(0));
 
         (uint256 bnbUsdPrice, uint8 oracleDecimals) = _getBnbPriceChecked();
         uint256 oracleScale = WadScaleLib.pow10(oracleDecimals);
 
-        minBnbWei = Math.mulDiv(topic.monthlyPriceWad, oracleScale, bnbUsdPrice, Math.Rounding.Up);
+        minBnbWei = Math.mulDiv(topic.monthlyPriceWad, oracleScale, bnbUsdPrice, Math.Rounding.Ceil);
     }
 
     function quoteMinRambleForOneMonth(
         bytes32 topicId
     ) external view returns (uint256 minRambleAmount) {
-        Topic storage topic = _requireTopic(topicId);
+        Topic storage topic = _requireActiveTopic(topicId);
         uint256 monthlyPriceWad = topic.monthlyPriceWad;
-        if (monthlyPriceWad == 0) {
+        if (_isNoPaymentRequired(topicId, monthlyPriceWad)) {
             return 0;
         }
+        _requireTopicPaymentTokenAllowed(topicId, RAMBLE_TOKEN);
+        _requireRamblePaymentSupported();
 
-        uint256 high = 1;
-        uint256 effectiveValueWad;
-        bool foundHigh;
+        minRambleAmount = _quoteMinRambleForValueWad(monthlyPriceWad);
+    }
 
-        for (uint256 i = 0; i < MAX_QUOTE_SEARCH_STEPS; ++i) {
-            (, effectiveValueWad) = _quoteRambleValueWad(high);
-            if (effectiveValueWad >= monthlyPriceWad) {
-                foundHigh = true;
-                break;
-            }
-
-            if (high > type(uint256).max / 2) {
-                revert QuoteUnavailable();
-            }
-
-            high *= 2;
+    function _quoteMinRambleForValueWad(
+        uint256 monthlyPriceWad
+    ) internal view returns (uint256 minRambleAmount) {
+        (bool found, uint256 quotedMinAmount) =
+            RamblePricingLib.quoteMinAmountForTargetValue(monthlyPriceWad, MAX_QUOTE_SEARCH_STEPS, _quoteRambleValueWad);
+        if (!found) {
+            revert QuoteUnavailable();
         }
 
-        if (!foundHigh) {
-            (, effectiveValueWad) = _quoteRambleValueWad(high);
-            if (effectiveValueWad < monthlyPriceWad) {
-                revert QuoteUnavailable();
-            }
+        return quotedMinAmount;
+    }
+
+    function quoteMinTokenForOneMonth(
+        bytes32 topicId,
+        address payToken
+    ) external view returns (uint256 minTokenAmount) {
+        Topic storage topic = _requireActiveTopic(topicId);
+        uint256 monthlyPriceWad = topic.monthlyPriceWad;
+        if (_isNoPaymentRequired(topicId, monthlyPriceWad)) {
+            return 0;
+        }
+        _requireTopicPaymentTokenAllowed(topicId, payToken);
+
+        if (payToken == address(0)) {
+            (uint256 bnbUsdPrice, uint8 oracleDecimals) = _getBnbPriceChecked();
+            return Math.mulDiv(monthlyPriceWad, WadScaleLib.pow10(oracleDecimals), bnbUsdPrice, Math.Rounding.Ceil);
+        }
+        if (payToken == RAMBLE_TOKEN) {
+            _requireRamblePaymentSupported();
+            return _quoteMinRambleForValueWad(monthlyPriceWad);
+        }
+        if (!_paymentTokenEnabled[payToken]) {
+            revert UnsupportedPayToken(payToken);
         }
 
-        uint256 low = 0;
-        for (uint256 i = 0; i < MAX_QUOTE_SEARCH_STEPS; ++i) {
-            if (low + 1 >= high) {
-                break;
-            }
-
-            uint256 mid = low + ((high - low) / 2);
-            (, effectiveValueWad) = _quoteRambleValueWad(mid);
-
-            if (effectiveValueWad >= monthlyPriceWad) {
-                high = mid;
-            } else {
-                low = mid;
-            }
-        }
-
-        minRambleAmount = high;
+        minTokenAmount = _quoteMinConfiguredTokenAmount(payToken, monthlyPriceWad);
     }
 
     function previewTopup(
@@ -464,14 +727,16 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         address payToken,
         uint256 amountIn
     ) external view returns (uint256 rawValueWad, uint256 effectiveValueWad, uint256 secondsAdded) {
-        Topic storage topic = _requireTopic(topicId);
+        Topic storage topic = _requireActiveTopic(topicId);
 
-        if (topic.monthlyPriceWad == 0 || amountIn == 0) {
+        if (_isNoPaymentRequired(topicId, topic.monthlyPriceWad) || amountIn == 0) {
             return (0, 0, 0);
         }
+        _requireTopicPaymentTokenAllowed(topicId, payToken);
 
         (rawValueWad, effectiveValueWad) = _previewPaymentValueWad(payToken, amountIn);
-        secondsAdded = Math.mulDiv(effectiveValueWad, ONE_MONTH, topic.monthlyPriceWad);
+        (, secondsAdded) =
+            TopicAccessPolicyLib.computeNewExpiry(0, 0, effectiveValueWad, ONE_MONTH, topic.monthlyPriceWad);
     }
 
     function _setRambleDiscountBps(
@@ -504,16 +769,19 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
             revert InvalidOracleConfig();
         }
 
+        _readOraclePriceChecked(bnbUsdOracle_, maxOracleDelay_);
         _bnbUsdOracle = bnbUsdOracle_;
         _maxOracleDelay = maxOracleDelay_;
 
         emit OracleConfigUpdated(bnbUsdOracle_, maxOracleDelay_);
     }
 
-    function _setStableToken(
+    function _setPaymentToken(
         address token,
-        bool enabled
-    ) internal {
+        bool enabled,
+        address usdOracle,
+        bool requireOracle
+    ) internal returns (uint8 tokenDecimals, uint8 oracleDecimals) {
         if (token == address(0)) {
             revert ZeroAddress();
         }
@@ -521,21 +789,42 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
             revert InvalidStableToken(token);
         }
 
-        uint8 decimals = _stableTokenDecimals[token];
+        PaymentTokenConfig memory config = _getPaymentTokenConfig(token);
+        tokenDecimals = config.tokenDecimals;
+        address oracleToStore = config.usdOracle;
+        oracleDecimals = config.oracleDecimals;
         if (enabled) {
             if (token.code.length == 0) {
                 revert InvalidStableToken(token);
             }
-            decimals = _readTokenDecimals(token);
-            WadScaleLib.validateDecimals(decimals);
-            _stableTokenDecimals[token] = decimals;
-        }
-        _stableTokenEnabled[token] = enabled;
+            tokenDecimals = _readTokenDecimals(token);
+            WadScaleLib.validateDecimals(tokenDecimals);
 
-        emit StableTokenUpdated(token, enabled, decimals);
+            if (requireOracle && usdOracle == address(0)) {
+                revert PaymentTokenOracleRequired(token);
+            }
+
+            oracleToStore = usdOracle;
+            oracleDecimals = 0;
+            if (oracleToStore != address(0)) {
+                (, oracleDecimals) = _readOraclePriceChecked(oracleToStore, _maxOracleDelay);
+            }
+        }
+
+        config.enabled = enabled;
+        config.tokenDecimals = tokenDecimals;
+        config.usdOracle = oracleToStore;
+        config.oracleDecimals = oracleDecimals;
+        _storePaymentTokenConfig(token, config);
+
+        emit PaymentTokenUpdated(token, enabled, oracleToStore, tokenDecimals, oracleDecimals);
     }
 
     function _setDefaultRamblePair() internal {
+        if (!_isBscChain()) {
+            return;
+        }
+
         _rambleWbnbPair = DEFAULT_RAMBLE_WBNB_PAIR;
         emit RamblePairUpdated(DEFAULT_RAMBLE_WBNB_PAIR);
 
@@ -547,6 +836,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     function _setRamblePair(
         address rambleWbnbPair_
     ) internal {
+        _requireRamblePaymentSupported();
         if (rambleWbnbPair_ == address(0)) {
             revert ZeroAddress();
         }
@@ -603,6 +893,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         }
 
         _topics[topicId] = Topic({ exists: true, monthlyPriceWad: monthlyPriceWad });
+        _topicIds.push(topicId);
 
         emit TopicCreated(topicId, monthlyPriceWad);
     }
@@ -617,11 +908,24 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         return keccak256(bytes(topicKey));
     }
 
+    function _registerTopicKey(
+        bytes32 topicId,
+        string memory topicKey
+    ) internal {
+        bytes32 derivedTopicId = _hashTopicKey(topicKey);
+        if (derivedTopicId != topicId) {
+            revert TopicKeyMismatch(topicId, derivedTopicId);
+        }
+
+        _topicKeyById[topicId] = topicKey;
+        emit TopicKeyRegistered(topicId, topicKey);
+    }
+
     function _previewPaymentValueWad(
         address payToken,
         uint256 amountIn
     ) internal view returns (uint256 rawValueWad, uint256 effectiveValueWad) {
-        // Native BNB and stablecoins use 1:1 effective value; RAMBLE applies discount-adjusted value.
+        // Native BNB and oracle-priced tokens use 1:1 effective value; RAMBLE applies discount-adjusted value.
         if (payToken == address(0)) {
             rawValueWad = _quoteBnbValueWad(amountIn);
             effectiveValueWad = rawValueWad;
@@ -629,14 +933,35 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         }
 
         if (payToken == RAMBLE_TOKEN) {
+            _requireRamblePaymentSupported();
             return _quoteRambleValueWad(amountIn);
         }
 
-        if (_stableTokenEnabled[payToken]) {
-            return _quoteStableValueWad(amountIn, _stableTokenDecimals[payToken]);
+        if (_getPaymentTokenConfig(payToken).enabled) {
+            return _quoteConfiguredTokenValueWad(payToken, amountIn);
         }
 
         revert UnsupportedPayToken(payToken);
+    }
+
+    function _quoteConfiguredTokenValueWad(
+        address payToken,
+        uint256 amountIn
+    ) internal view returns (uint256 rawValueWad, uint256 effectiveValueWad) {
+        PaymentTokenConfig memory config = _getPaymentTokenConfig(payToken);
+        uint8 tokenDecimals = config.tokenDecimals;
+        address usdOracle = config.usdOracle;
+
+        if (usdOracle == address(0)) {
+            return _quoteStableValueWad(amountIn, tokenDecimals);
+        }
+
+        (uint256 tokenUsdPrice, uint8 oracleDecimals) = _readOraclePriceChecked(usdOracle, _maxOracleDelay);
+        uint256 oracleScale = WadScaleLib.pow10(oracleDecimals);
+        uint256 amountWad = WadScaleLib.toWad(amountIn, tokenDecimals);
+
+        rawValueWad = Math.mulDiv(amountWad, tokenUsdPrice, oracleScale);
+        effectiveValueWad = rawValueWad;
     }
 
     function _quoteStableValueWad(
@@ -645,6 +970,24 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     ) internal pure returns (uint256 rawValueWad, uint256 effectiveValueWad) {
         rawValueWad = WadScaleLib.toWad(amountIn, tokenDecimals);
         effectiveValueWad = rawValueWad;
+    }
+
+    function _quoteMinConfiguredTokenAmount(
+        address payToken,
+        uint256 requiredValueWad
+    ) internal view returns (uint256 minTokenAmount) {
+        PaymentTokenConfig memory config = _getPaymentTokenConfig(payToken);
+        uint8 tokenDecimals = config.tokenDecimals;
+        address usdOracle = config.usdOracle;
+        if (usdOracle == address(0)) {
+            return WadScaleLib.fromWadRoundUp(requiredValueWad, tokenDecimals);
+        }
+
+        (uint256 tokenUsdPrice, uint8 oracleDecimals) = _readOraclePriceChecked(usdOracle, _maxOracleDelay);
+        uint256 requiredTokenWad =
+            Math.mulDiv(requiredValueWad, WadScaleLib.pow10(oracleDecimals), tokenUsdPrice, Math.Rounding.Ceil);
+
+        minTokenAmount = WadScaleLib.fromWadRoundUp(requiredTokenWad, tokenDecimals);
     }
 
     function _quoteBnbValueWad(
@@ -659,6 +1002,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     function _quoteRambleValueWad(
         uint256 rambleAmount
     ) internal view returns (uint256 rawValueWad, uint256 effectiveValueWad) {
+        _requireRamblePaymentSupported();
         // RAMBLE amount is converted to expected WBNB out (AMM curve), then priced by BNB/USD oracle.
         uint256 wbnbOut = _estimateWbnbOutFromRamble(rambleAmount);
         rawValueWad = _quoteBnbValueWad(wbnbOut);
@@ -671,12 +1015,14 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     ) internal view returns (uint256 wbnbOut) {
         IPancakePairV2 pair = _getConfiguredRamblePair();
         (,, uint256 reserveIn, uint256 reserveOut) = _getRamblePairState(pair);
-        wbnbOut = _getV2AmountOut(rambleAmount, reserveIn, reserveOut);
+        wbnbOut =
+            RamblePricingLib.getV2AmountOut(rambleAmount, reserveIn, reserveOut, V2_FEE_NUMERATOR, V2_FEE_DENOMINATOR);
     }
 
     function _swapRambleToBnb(
         uint256 rambleAmount
     ) internal returns (uint256 effectiveValueWad) {
+        _requireRamblePaymentSupported();
         IPancakePairV2 pair = _getConfiguredRamblePair();
         (bool rambleIsToken0, address wrappedNative, uint256 reserveIn, uint256 reserveOut) = _getRamblePairState(pair);
 
@@ -684,7 +1030,9 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         IERC20(RAMBLE_TOKEN).safeTransfer(address(pair), rambleAmount);
         uint256 amountInActual = IERC20(RAMBLE_TOKEN).balanceOf(address(pair)) - pairRambleBalanceBefore;
 
-        uint256 expectedWbnbOut = _getV2AmountOut(amountInActual, reserveIn, reserveOut);
+        uint256 expectedWbnbOut = RamblePricingLib.getV2AmountOut(
+            amountInActual, reserveIn, reserveOut, V2_FEE_NUMERATOR, V2_FEE_DENOMINATOR
+        );
         if (expectedWbnbOut == 0) {
             revert PairLiquidityTooLow();
         }
@@ -736,6 +1084,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     }
 
     function _getConfiguredRamblePair() internal view returns (IPancakePairV2 pair) {
+        _requireRamblePaymentSupported();
         address pairAddress = _rambleWbnbPair;
         if (pairAddress == address(0) || pairAddress.code.length == 0) {
             revert RamblePairNotConfigured(pairAddress);
@@ -743,43 +1092,139 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         pair = IPancakePairV2(pairAddress);
     }
 
-    function _getV2AmountOut(
-        uint256 amountIn,
-        uint256 reserveIn,
-        uint256 reserveOut
-    ) internal pure returns (uint256) {
-        if (amountIn == 0) {
-            return 0;
-        }
-
-        uint256 amountInWithFee = amountIn * V2_FEE_NUMERATOR;
-        uint256 denominator = (reserveIn * V2_FEE_DENOMINATOR) + amountInWithFee;
-        if (denominator == 0) {
-            return 0;
-        }
-
-        return Math.mulDiv(amountInWithFee, reserveOut, denominator);
+    function _getBnbPriceChecked() internal view returns (uint256 bnbUsdPrice, uint8 oracleDecimals) {
+        return _readOraclePriceChecked(_bnbUsdOracle, _maxOracleDelay);
     }
 
-    function _getBnbPriceChecked() internal view returns (uint256 bnbUsdPrice, uint8 oracleDecimals) {
-        IAggregatorV3 oracle = IAggregatorV3(_bnbUsdOracle);
+    function _getPaymentTokenConfig(
+        address token
+    ) internal view returns (PaymentTokenConfig memory config) {
+        config.enabled = _paymentTokenEnabled[token];
+        config.tokenDecimals = _paymentTokenDecimals[token];
+        config.usdOracle = _paymentTokenOracle[token];
+        config.oracleDecimals = _paymentTokenOracleDecimals[token];
+    }
 
-        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) = oracle.latestRoundData();
+    function _storePaymentTokenConfig(
+        address token,
+        PaymentTokenConfig memory config
+    ) internal {
+        _paymentTokenEnabled[token] = config.enabled;
+        _paymentTokenDecimals[token] = config.tokenDecimals;
+        _paymentTokenOracle[token] = config.usdOracle;
+        _paymentTokenOracleDecimals[token] = config.oracleDecimals;
+    }
+
+    function _isNoPaymentRequired(
+        bytes32 topicId,
+        uint256 monthlyPriceWad
+    ) internal view returns (bool) {
+        return
+            TopicAccessPolicyLib.isNoPaymentRequired(
+                monthlyPriceWad, _getEffectiveTrialEndsAt(topicId), block.timestamp
+            );
+    }
+
+    function _isTopicPaymentTokenAllowed(
+        bytes32 topicId,
+        address payToken
+    ) internal view returns (bool) {
+        return TopicAccessPolicyLib.isTopicPaymentTokenAllowed(
+            _topicPaymentAllowlistEnabled[topicId], _topicPaymentTokenAllowed[topicId][payToken]
+        );
+    }
+
+    function _requireTopicPaymentTokenAllowed(
+        bytes32 topicId,
+        address payToken
+    ) internal view {
+        if (!_isTopicPaymentTokenAllowed(topicId, payToken)) {
+            revert PayTokenNotAllowedForTopic(topicId, payToken);
+        }
+    }
+
+    function _isTrialActive(
+        bytes32 topicId
+    ) internal view returns (bool) {
+        return
+            TopicAccessPolicyLib.effectiveTrialEndsAt(_globalTrialEndsAt, _topicTrialEndsAt[topicId]) > block.timestamp;
+    }
+
+    function _isBscChain() internal view returns (bool) {
+        return block.chainid == BSC_CHAIN_ID;
+    }
+
+    function _requireRamblePaymentSupported() internal view {
+        if (!_isBscChain()) {
+            revert RambleOnlySupportedOnBsc(block.chainid);
+        }
+    }
+
+    function _getEffectiveTrialEndsAt(
+        bytes32 topicId
+    ) internal view returns (uint256) {
+        return TopicAccessPolicyLib.effectiveTrialEndsAt(_globalTrialEndsAt, _topicTrialEndsAt[topicId]);
+    }
+
+    function _readOraclePriceChecked(
+        address oracleAddress,
+        uint256 maxOracleDelay_
+    ) internal view returns (uint256 bnbUsdPrice, uint8 oracleDecimals) {
+        if (oracleAddress.code.length == 0) {
+            revert InvalidOracle(oracleAddress);
+        }
+
+        IAggregatorV3 oracle = IAggregatorV3(oracleAddress);
+
+        try oracle.decimals() returns (uint8 decimals_) {
+            oracleDecimals = decimals_;
+        } catch {
+            revert InvalidOracle(oracleAddress);
+        }
+
+        WadScaleLib.validateDecimals(oracleDecimals);
+
+        uint80 roundId;
+        int256 answer;
+        uint256 updatedAt;
+        uint80 answeredInRound;
+        try oracle.latestRoundData() returns (
+            uint80 roundId_, int256 answer_, uint256, uint256 updatedAt_, uint80 answeredInRound_
+        ) {
+            roundId = roundId_;
+            answer = answer_;
+            updatedAt = updatedAt_;
+            answeredInRound = answeredInRound_;
+        } catch {
+            revert InvalidOracle(oracleAddress);
+        }
 
         if (answer <= 0 || updatedAt == 0 || updatedAt > block.timestamp) {
             revert OraclePriceInvalid();
         }
-        if (block.timestamp - updatedAt > _maxOracleDelay) {
-            revert OraclePriceStale(updatedAt, block.timestamp, _maxOracleDelay);
+        if (block.timestamp - updatedAt > maxOracleDelay_) {
+            revert OraclePriceStale(updatedAt, block.timestamp, maxOracleDelay_);
         }
         if (answeredInRound < roundId) {
             revert OracleRoundInvalid(roundId, answeredInRound);
         }
 
-        oracleDecimals = oracle.decimals();
-        WadScaleLib.validateDecimals(oracleDecimals);
-
         bnbUsdPrice = uint256(answer);
+    }
+
+    function _setExpiry(
+        bytes32 topicId,
+        address user,
+        uint256 newExpiry
+    ) internal {
+        _requireTopic(topicId);
+        if (user == address(0)) {
+            revert ZeroAddress();
+        }
+
+        uint256 oldExpiry = _expiryByTopicUser[topicId][user];
+        _expiryByTopicUser[topicId][user] = newExpiry;
+        emit ExpiryUpdated(topicId, user, oldExpiry, newExpiry);
     }
 
     function _requireTopic(
@@ -788,6 +1233,15 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         topic = _topics[topicId];
         if (!topic.exists) {
             revert TopicNotFound(topicId);
+        }
+    }
+
+    function _requireActiveTopic(
+        bytes32 topicId
+    ) internal view returns (Topic storage topic) {
+        topic = _requireTopic(topicId);
+        if (_topicDeactivated[topicId]) {
+            revert TopicIsDeactivated(topicId);
         }
     }
 

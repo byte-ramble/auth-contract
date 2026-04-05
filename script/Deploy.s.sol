@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
 import "../src/TopicAccessManagerUpgradeable.sol";
-import "../src/mocks/TestERC1967Proxy.sol";
 
 interface VmScript {
     function envAddress(
@@ -33,7 +34,7 @@ contract DeployScript {
         bytes memory initData =
             abi.encodeCall(TopicAccessManagerUpgradeable.initialize, (owner, bnbUsdOracle, maxOracleDelay));
 
-        TestERC1967Proxy p = new TestERC1967Proxy(address(impl), initData);
+        ERC1967Proxy p = new ERC1967Proxy(address(impl), initData);
 
         vm.stopBroadcast();
 

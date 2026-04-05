@@ -22,7 +22,7 @@ contract UpgradeScript {
         vm.startBroadcast();
 
         TopicAccessManagerUpgradeable impl = new TopicAccessManagerUpgradeable();
-        TopicAccessManagerUpgradeable(proxyAddress).upgradeTo(address(impl));
+        TopicAccessManagerUpgradeable(proxyAddress).upgradeToAndCall(address(impl), "");
 
         vm.stopBroadcast();
 

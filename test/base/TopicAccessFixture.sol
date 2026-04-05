@@ -37,6 +37,8 @@ abstract contract TopicAccessFixture is TestBase {
     WadScaleHarness internal wadHarness;
 
     function setUp() public virtual {
+        vm.chainId(56);
+
         vm.deal(owner, 100 ether);
         vm.deal(user, 100 ether);
         vm.deal(user2, 100 ether);

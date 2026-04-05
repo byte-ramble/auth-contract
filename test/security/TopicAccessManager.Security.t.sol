@@ -8,21 +8,21 @@ contract TopicAccessManagerSecurityTest is TopicAccessFixture {
     function testOnlyOwnerRestrictedFunctions() external {
         bytes32 topicId = _hashTopic("security.owner.only");
 
-        vm.expectRevert(bytes("Ownable: caller is not the owner"));
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", attacker));
         vm.prank(attacker);
         manager.createTopic(topicId, 1e18);
 
         _createTopic(topicId, 1e18);
 
-        vm.expectRevert(bytes("Ownable: caller is not the owner"));
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", attacker));
         vm.prank(attacker);
         manager.setTopicPrice(topicId, 2e18);
 
-        vm.expectRevert(bytes("Ownable: caller is not the owner"));
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", attacker));
         vm.prank(attacker);
         manager.setWhitelist(topicId, user, true);
 
-        vm.expectRevert(bytes("Ownable: caller is not the owner"));
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", attacker));
         vm.prank(attacker);
         manager.setRambleDiscountBps(9000);
     }
@@ -36,7 +36,7 @@ contract TopicAccessManagerSecurityTest is TopicAccessFixture {
         vm.prank(owner);
         manager.pause();
 
-        vm.expectRevert(bytes("Pausable: paused"));
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
         vm.prank(user);
         manager.topup(topicId, address(usdc), 100e6, user);
 

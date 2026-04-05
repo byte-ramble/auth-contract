@@ -8,8 +8,11 @@
     "test:unit": "forge test --offline --match-path \"test/unit/*.t.sol\" -vv",
     "test:security": "forge test --offline --match-path \"test/security/*.t.sol\" -vv",
     "test:upgrade": "forge test --offline --match-path \"test/upgrade/*.t.sol\" -vv",
+    "test:lifecycle": "forge test --offline --match-path \"test/lifecycle/*.t.sol\" -vv",
     "test:fuzz": "forge test --offline --match-path \"test/fuzz/*.t.sol\" -vv",
-    "check:security": "npm run test:security && npm run test:upgrade && npm run test:fuzz",
+    "test:fork": "forge test --match-path \"test/fork/*.t.sol\" -vv",
+    "check:security": "npm run test:security && npm run test:upgrade && npm run test:lifecycle && npm run test:fuzz",
+    "ci": "npm run fmt:check && npm run build && npm run test && forge coverage --offline --report summary",
     "fmt": "forge fmt",
     "fmt:check": "forge fmt --check",
     "clean": "forge clean"

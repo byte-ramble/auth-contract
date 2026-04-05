@@ -16,14 +16,40 @@ interface Vm {
         uint256
     ) external;
 
+    function chainId(
+        uint256 newChainId
+    ) external;
+
     function deal(
         address who,
         uint256 newBalance
     ) external;
 
+    function deal(
+        address token,
+        address to,
+        uint256 give,
+        bool adjust
+    ) external;
+
     function etch(
         address who,
         bytes calldata code
+    ) external;
+
+    function createSelectFork(
+        string calldata urlOrAlias
+    ) external returns (uint256 forkId);
+
+    function envOr(
+        string calldata key,
+        string calldata defaultValue
+    ) external view returns (string memory value);
+
+    function store(
+        address target,
+        bytes32 slot,
+        bytes32 value
     ) external;
 
     function expectRevert(
