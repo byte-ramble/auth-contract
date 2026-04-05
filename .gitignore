@@ -3,3 +3,10 @@
 /broadcast/
 /artifacts/
 
+# Deployment state (contains addresses, no secrets)
+deployments/
+
+# Environment
+.env
+.env.*
+
