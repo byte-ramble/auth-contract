@@ -105,12 +105,11 @@ export function runForgeScript(scriptPath, { privateKey, extraArgs = [], dryRun 
     const args = [
         'forge', 'script', scriptPath,
         '--rpc-url', rpcUrl,
-        '--private-key', privateKey,
         '--broadcast',
-        '--skip-simulation',
         ...extraArgs,
     ];
 
+    // Log command without sensitive data
     const cmd = args.join(' ');
     console.log(`\n[forge] ${dryRun ? '(dry-run) ' : ''}${cmd}\n`);
 
@@ -120,7 +119,8 @@ export function runForgeScript(scriptPath, { privateKey, extraArgs = [], dryRun 
         execSync(cmd, {
             cwd: PROJECT_ROOT,
             stdio: 'inherit',
-            env: { ...process.env },
+            // Pass private key via env var instead of CLI arg to avoid ps aux exposure
+            env: { ...process.env, FOUNDRY_PRIVATE_KEY: privateKey },
         });
     } catch (err) {
         throw new Error(`forge script failed: ${scriptPath}`);
@@ -166,6 +166,83 @@ export function extractBroadcastAddresses(scriptName) {
 
     const latest = JSON.parse(fs.readFileSync(path.join(chainDir, files[0]), 'utf8'));
     return latest;
+}
+
+// ---------------------------------------------------------------------------
+// Deployer balance check
+// ---------------------------------------------------------------------------
+
+/**
+ * Check deployer BNB balance before deployment.
+ * @param {string} address - deployer address
+ * @param {number} [minBnb=0.01] - minimum required BNB balance
+ */
+export function checkDeployerBalance(address, minBnb = 0.01) {
+    const rpcUrl = readClean(process.env.BSC_RPC_URL);
+    if (!rpcUrl) return; // skip if no RPC configured
+
+    try {
+        const result = execSync(
+            `cast balance ${address} --rpc-url ${rpcUrl}`,
+            { cwd: PROJECT_ROOT, encoding: 'utf8', timeout: 15_000 },
+        ).trim();
+
+        const balanceWei = BigInt(result);
+        const balanceEth = Number(balanceWei) / 1e18;
+        console.log(`[deploy] deployer balance: ${balanceEth.toFixed(4)} BNB`);
+
+        if (balanceEth < minBnb) {
+            throw new Error(`Deployer balance too low: ${balanceEth.toFixed(4)} BNB < ${minBnb} BNB minimum`);
+        }
+    } catch (err) {
+        if (err.message.includes('too low')) throw err;
+        console.warn(`[deploy] WARNING: could not check deployer balance: ${err.message}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contract verification
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify contract on BSCScan.
+ * @param {string} contractAddress - deployed contract address
+ * @param {string} contractPath - e.g. "src/TopicAccessManagerUpgradeable.sol:TopicAccessManagerUpgradeable"
+ * @param {string[]} [constructorArgs] - constructor arguments (if any)
+ */
+export function verifyContract(contractAddress, contractPath, constructorArgs = []) {
+    const apiKey = readClean(process.env.BSCSCAN_API_KEY);
+    if (!apiKey) {
+        console.warn('[verify] WARNING: BSCSCAN_API_KEY not set, skipping verification');
+        return;
+    }
+
+    const args = [
+        'forge', 'verify-contract',
+        contractAddress,
+        contractPath,
+        '--chain', 'bsc',
+        '--etherscan-api-key', apiKey,
+        '--watch',
+    ];
+
+    if (constructorArgs.length > 0) {
+        args.push('--constructor-args', ...constructorArgs);
+    }
+
+    const cmd = args.join(' ');
+    console.log(`\n[verify] ${cmd}\n`);
+
+    try {
+        execSync(cmd, {
+            cwd: PROJECT_ROOT,
+            stdio: 'inherit',
+            timeout: 120_000,
+        });
+        console.log(`[verify] ${contractAddress} verified successfully`);
+    } catch (err) {
+        console.warn(`[verify] WARNING: verification failed for ${contractAddress}: ${err.message}`);
+    }
 }
 
 // ---------------------------------------------------------------------------

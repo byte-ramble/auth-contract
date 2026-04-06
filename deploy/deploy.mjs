@@ -23,6 +23,8 @@ import {
     extractBroadcastAddresses,
     requireEnv,
     readClean,
+    checkDeployerBalance,
+    verifyContract,
 } from './shared.mjs';
 
 // ---------------------------------------------------------------------------
@@ -33,6 +35,7 @@ async function actionDeploy(dryRun) {
     requireEnv('OWNER', 'BNB_USD_ORACLE', 'MAX_ORACLE_DELAY');
 
     const wallet = await unlockWallet();
+    if (!dryRun) checkDeployerBalance(wallet.address);
 
     // Step 1: Deploy implementation + proxy
     console.log('[deploy] step 1/2 — Deploy implementation + proxy');
@@ -146,6 +149,24 @@ async function actionUpgradeAndMigrate(dryRun) {
     }
 }
 
+async function actionVerify() {
+    const state = readDeploymentState();
+    if (!state.implementation) {
+        throw new Error('No implementation address found in deployment state. Deploy first.');
+    }
+
+    console.log('[verify] verifying implementation contract');
+    verifyContract(
+        state.implementation,
+        'src/TopicAccessManagerUpgradeable.sol:TopicAccessManagerUpgradeable',
+    );
+
+    if (state.proxy) {
+        console.log('[verify] verifying proxy contract');
+        verifyContract(state.proxy, 'lib/openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy');
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -174,6 +195,7 @@ Actions:
   configure           Run PostDeployConfigure on existing proxy
   upgrade             Upgrade to new implementation
   upgrade-and-migrate Upgrade + migrate legacy stable tokens
+  verify              Verify deployed contracts on BSCScan
 
 Options:
   --dry-run           Print forge commands without executing
@@ -186,6 +208,7 @@ Required .env vars:
   BNB_USD_ORACLE      Chainlink BNB/USD oracle address (for deploy)
   MAX_ORACLE_DELAY    Max oracle staleness in seconds (for deploy)
   PROXY_ADDRESS       Deployed proxy address (for configure/upgrade)
+  BSCSCAN_API_KEY     BSCScan API key (for verify)
 `);
 }
 
@@ -200,6 +223,7 @@ async function main() {
         configure: actionConfigure,
         upgrade: actionUpgrade,
         'upgrade-and-migrate': actionUpgradeAndMigrate,
+        verify: actionVerify,
     };
 
     const handler = handlers[args.action];

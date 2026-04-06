@@ -1,4 +1,4 @@
-# BSC Topic 权限合约安全审计与加固记录（v1.6）
+# BSC Topic 权限合约安全审计与加固记录（v1.7）
 
 关联文档：`../requirements/product-requirements.md`、`../design/architecture.md`、`../design/storage-layout.md`、`../design/flowcharts.md`、`../implementation/implementation-guide.md`、`../operations/runbook.md`
 
@@ -76,6 +76,24 @@
 19. `LOW`：payment token 元数据的读写散落在多组并行 mapping 中，后续维护容易继续扩散。  
    修复：新增内部 `PaymentTokenConfig` 抽象，统一 payment token 配置读写入口，降低后续扩展时的耦合度。
 
+20. `CRITICAL`：存储布局文档（`storage-layout.md` v1.2）严重过期：OZ v5 迁移后 `_initialized`/`_initializing`/`_status` 改用 ERC-7201 命名空间存储不再占用顺序 slot，导致所有后续变量 slot 偏移；`_stableTokenEnabled/_stableTokenDecimals` 已重命名为 `_paymentTokenEnabled/_paymentTokenDecimals`；新增 `_topicDeactivated`（slot 23）；`__gap` 从 30 缩减为 29。
+   修复：重新生成 storage layout 快照，更新为 v2.0，增加 v1.2 差异摘要与 OZ 非升级版永久约束说明。
+
+21. `HIGH`：部署脚本 `shared.mjs` 中 `--private-key` 作为 CLI 参数传递，可被 `ps aux` 暴露；`console.log` 完整输出含私钥的命令行。
+   修复：改用 `FOUNDRY_PRIVATE_KEY` 环境变量传递私钥，从 CLI 参数和日志输出中移除。
+
+22. `HIGH`：部署脚本使用 `--skip-simulation` 跳过 `eth_call` 模拟，revert 交易直接上链浪费 gas。
+   修复：移除 `--skip-simulation` 标志。
+
+23. `LOW`：部署脚本无 deployer BNB 余额预检查，可能在余额不足时浪费 gas。
+   修复：新增 `checkDeployerBalance` 在部署前检查余额。
+
+24. `LOW`：部署后未在 BSCScan 验证源码。
+   修复：新增 `verifyContract` 工具函数与 `deploy:verify` action。
+
+25. `LOW`：无资金提取 SOP，合约累积的 BNB/ERC20 提取依赖隐式的 `executePrivilegedCall` 知识。
+   修复：在 `runbook.md` 新增资金提取 SOP（第 8 节），含 BNB/ERC20 提取的 cast 示例与注意事项。
+
 ### 4.2 残余风险（设计接受项）
 1. 特权 `executePrivilegedCall` 本质是高权限后门能力，属于治理风险而非实现漏洞。  
    建议：owner 使用多签，executor 采用最小权限地址，并接入告警。
@@ -99,3 +117,14 @@
 - `npm run -w @omniarb/auth-contract fmt:check`：通过
 - `npm run ci`：通过（含 `fmt/build/test/coverage`）
 - `BSC_RPC_URL=<RPC> forge test --match-path "test/fork/*.t.sol"`：当前仓库已有真实 BSC fork 用例；若本机受 Foundry/macOS 网络环境影响，建议转 Linux CI 或无代理 shell 执行
+
+## 6. v1.7 审计修复清单（2026-04-06）
+| # | 严重性 | 修复内容 | 文件 |
+|---|--------|----------|------|
+| 20 | CRITICAL | 存储布局文档重新生成 v2.0 | `storage-layout.md` |
+| 21 | HIGH | 私钥改用环境变量传递 | `deploy/shared.mjs` |
+| 22 | HIGH | 移除 `--skip-simulation` | `deploy/shared.mjs` |
+| 23 | LOW | 添加 deployer 余额预检查 | `deploy/shared.mjs`, `deploy/deploy.mjs` |
+| 24 | LOW | 添加 BSCScan 验证 action | `deploy/shared.mjs`, `deploy/deploy.mjs` |
+| 25 | LOW | 添加资金提取 SOP | `docs/operations/runbook.md` |
+| — | MEDIUM | OZ 非升级版永久约束文档化 | `storage-layout.md`, `architecture.md` |

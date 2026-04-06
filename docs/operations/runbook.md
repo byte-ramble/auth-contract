@@ -1,4 +1,4 @@
-# BSC Topic 权限合约运维文档（v1.1）
+# BSC Topic 权限合约运维文档（v1.2）
 
 关联文档：`../README.md`、`../governance/document-layout.md`、`../design/flowcharts.md`、`../design/storage-layout.md`、`../implementation/implementation-guide.md`、`../security/security-audit.md`、`../testing/ops-lifecycle-testing.md`
 
@@ -108,7 +108,66 @@
   - 通过 owner 将 proxy 升级到上一个已验证实现。
   - 回滚前后均执行最小回归（`hasAccess/topup/quote`）。
 
-## 8. 日常运维检查
+## 8. 资金提取 SOP
+
+合约通过 `topup` 收集的 BNB 和 ERC20 代币，只能通过 `executePrivilegedCall` 提取。
+调用者需为 owner 或 executor。
+
+### 8.1 提取 BNB
+
+```solidity
+// 通过 cast 或 multisig 执行
+executePrivilegedCall(
+    recipientAddress,   // target: 接收地址
+    amountInWei,        // value: 提取金额（Wei）
+    ""                  // data: 空
+)
+```
+
+**cast 示例**：
+```bash
+cast send <PROXY_ADDRESS> \
+  "executePrivilegedCall(address,uint256,bytes)" \
+  <RECIPIENT> <AMOUNT_WEI> "0x" \
+  --rpc-url <BSC_RPC_URL> --private-key <KEY>
+```
+
+### 8.2 提取 ERC20 代币
+
+```solidity
+executePrivilegedCall(
+    tokenAddress,       // target: 代币合约地址
+    0,                  // value: 0
+    abi.encodeCall(IERC20.transfer, (recipientAddress, tokenAmount))
+)
+```
+
+**cast 示例**：
+```bash
+cast send <PROXY_ADDRESS> \
+  "executePrivilegedCall(address,uint256,bytes)" \
+  <TOKEN_ADDRESS> 0 \
+  $(cast calldata "transfer(address,uint256)" <RECIPIENT> <AMOUNT>) \
+  --rpc-url <BSC_RPC_URL> --private-key <KEY>
+```
+
+### 8.3 查询合约余额
+
+```bash
+# BNB 余额
+cast balance <PROXY_ADDRESS> --rpc-url <BSC_RPC_URL>
+
+# ERC20 余额
+cast call <TOKEN_ADDRESS> "balanceOf(address)" <PROXY_ADDRESS> --rpc-url <BSC_RPC_URL>
+```
+
+### 8.4 提取注意事项
+- 建议通过多签执行，避免单点密钥风险。
+- 每次提取后核对合约余额与 `Topup` 事件日志。
+- `executePrivilegedCall` 执行成功后会发出 `PrivilegedCallExecuted` 事件，可用于审计。
+- 不要将合约余额提取到 0，保留少量 BNB 以便后续 RAMBLE swap 的 WBNB unwrap 回调。
+
+## 9. 日常运维检查
 - 配置一致性：
   - `getOracleConfig`、`getRamblePair`、`getRambleDiscountBps`
   - `getPaymentTokenConfig` 是否符合业务 token 清单

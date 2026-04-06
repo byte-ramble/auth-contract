@@ -25,13 +25,18 @@
 - 升级模式：`UUPS`。
 - 代理实现：`ERC1967Proxy`。
 - 依赖模块：
-  - `Initializable`
-  - `UUPSUpgradeable`
-  - `Ownable2Step`
-  - `Pausable`
-  - `ReentrancyGuard`
+  - `Initializable`（`@openzeppelin/contracts/proxy/utils/`）
+  - `UUPSUpgradeable`（`@openzeppelin/contracts/proxy/utils/`）
+  - `Ownable2Step`（`@openzeppelin/contracts/access/`）
+  - `Pausable`（`@openzeppelin/contracts/utils/`）
+  - `ReentrancyGuard`（`@openzeppelin/contracts/utils/`）
   - `SafeERC20`
   - `Math`
+- **永久约束 — OZ 非升级版合约**：
+  本合约使用 `@openzeppelin/contracts/`（非 upgradeable）版本的 Ownable2Step、
+  Pausable、ReentrancyGuard。在 OZ v5 中，非升级版与升级版使用不同的 ERC-7201
+  命名空间 ID，存储布局不兼容。**未来升级绝不能切换到 `@openzeppelin/contracts-upgradeable/`**，
+  否则会导致存储布局破坏。详见 `./storage-layout.md` 第 5 节。
 - 初始化精简策略：
   - `initialize` 仅注入 `initialOwner + oracle + delay`。
   - RAMBLE 地址、默认 Pair、默认折扣使用合约常量，不通过初始化传参。
