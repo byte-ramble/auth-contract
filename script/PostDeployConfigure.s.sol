@@ -29,6 +29,8 @@ interface VmScript {
 }
 
 contract PostDeployConfigureScript {
+    uint256 private constant BSC_MAINNET_CHAIN_ID = 56;
+
     address private constant WETH = 0x2170Ed0880ac9A755fd29B2688956BD959F933F8;
     address private constant USDT = 0x55d398326f99059fF775485246999027B3197955;
     address private constant USDC = 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d;
@@ -62,7 +64,7 @@ contract PostDeployConfigureScript {
 
         vm.startBroadcast();
 
-        if (configureBscPaymentTokens) {
+        if (configureBscPaymentTokens && block.chainid == BSC_MAINNET_CHAIN_ID) {
             configuredTokens += _setPaymentTokenIfNeeded(manager, WETH, ETH_USD_ORACLE);
             configuredTokens += _setPaymentTokenIfNeeded(manager, USDT, USDT_USD_ORACLE);
             configuredTokens += _setPaymentTokenIfNeeded(manager, USDC, USDC_USD_ORACLE);

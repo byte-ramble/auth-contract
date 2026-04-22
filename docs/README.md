@@ -59,7 +59,7 @@
 - RAMBLE 地址由合约常量定义，不通过初始化注入。
 - 支付代币通过 `setPaymentToken(token, enabled, usdOracle)` 后置注册；`setStableToken` 仅保留为 1:1 USD 兼容入口。
 - 旧版升级可使用 `script/UpgradeAndMigrate.s.sol` 自动迁移 legacy 稳定币配置。
-- 特权调用权限：`owner` 默认可用，`executorA/B` 由 owner 后置配置。
+- 特权调用权限：`owner` 默认可用，`executor` 由 owner 后置配置。
 - 真实 BSC fork 用例需要 `BSC_RPC_URL`；缺失时 `test/fork/*.t.sol` 自动跳过。
 
 ## 技术栈结论

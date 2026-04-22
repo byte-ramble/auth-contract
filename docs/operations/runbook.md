@@ -46,7 +46,7 @@
      - `TOPIC_TRIAL_KEYS=topic.a,topic.b`
      - `TOPIC_TRIAL_ENDS_ATS=1735689600,1738291200`
 3. 部署后初始化配置（按业务需要）：
-   - `setExecutors(executorA, executorB)`
+   - `setExecutor(executor)`
    - `setPaymentToken(token, true, usdOracle)`（非稳定币或希望显式绑定 oracle 的 token）
    - `setStableToken(stableToken, true)`（1:1 USD 稳定币兼容入口，可重复调用添加多个）
    - `setGlobalTrialEndsAt(trialEndsAt)` / `setTopicTrialEndsAt(topicId, trialEndsAt)`
@@ -110,44 +110,34 @@
 
 ## 8. 资金提取 SOP
 
-合约通过 `topup` 收集的 BNB 和 ERC20 代币，只能通过 `executePrivilegedCall` 提取。
-调用者需为 owner 或 executor。
+合约通过 `topup` 收集的 BNB 和 ERC20 代币，应通过 `withdrawNative/withdrawERC20` 提取。
+调用者需为 owner 或 executor；`executePrivilegedCall` 保留为通用治理/应急调用，不用于标准 ERC20 出金。
 
 ### 8.1 提取 BNB
 
 ```solidity
-// 通过 cast 或 multisig 执行
-executePrivilegedCall(
-    recipientAddress,   // target: 接收地址
-    amountInWei,        // value: 提取金额（Wei）
-    ""                  // data: 空
-)
+withdrawNative(recipientAddress, amountInWei)
 ```
 
 **cast 示例**：
 ```bash
 cast send <PROXY_ADDRESS> \
-  "executePrivilegedCall(address,uint256,bytes)" \
-  <RECIPIENT> <AMOUNT_WEI> "0x" \
+  "withdrawNative(address,uint256)" \
+  <RECIPIENT> <AMOUNT_WEI> \
   --rpc-url <BSC_RPC_URL> --private-key <KEY>
 ```
 
 ### 8.2 提取 ERC20 代币
 
 ```solidity
-executePrivilegedCall(
-    tokenAddress,       // target: 代币合约地址
-    0,                  // value: 0
-    abi.encodeCall(IERC20.transfer, (recipientAddress, tokenAmount))
-)
+withdrawERC20(tokenAddress, recipientAddress, tokenAmount)
 ```
 
 **cast 示例**：
 ```bash
 cast send <PROXY_ADDRESS> \
-  "executePrivilegedCall(address,uint256,bytes)" \
-  <TOKEN_ADDRESS> 0 \
-  $(cast calldata "transfer(address,uint256)" <RECIPIENT> <AMOUNT>) \
+  "withdrawERC20(address,address,uint256)" \
+  <TOKEN_ADDRESS> <RECIPIENT> <AMOUNT> \
   --rpc-url <BSC_RPC_URL> --private-key <KEY>
 ```
 
@@ -164,7 +154,8 @@ cast call <TOKEN_ADDRESS> "balanceOf(address)" <PROXY_ADDRESS> --rpc-url <BSC_RP
 ### 8.4 提取注意事项
 - 建议通过多签执行，避免单点密钥风险。
 - 每次提取后核对合约余额与 `Topup` 事件日志。
-- `executePrivilegedCall` 执行成功后会发出 `PrivilegedCallExecuted` 事件，可用于审计。
+- `withdrawNative/withdrawERC20` 执行成功后会发出 `PrivilegedWithdrawalExecuted` 事件，可用于审计。
+- `executePrivilegedCall` 仍会发出 `PrivilegedCallExecuted`，但 ERC20 `transfer` 负载会被显式拒绝。
 - 不要将合约余额提取到 0，保留少量 BNB 以便后续 RAMBLE swap 的 WBNB unwrap 回调。
 
 ## 9. 日常运维检查

@@ -5,10 +5,12 @@ import "../base/TopicAccessFixture.sol";
 import "../../src/libraries/WadScaleLib.sol";
 import "../../src/mocks/MockFeeOnTransferERC20.sol";
 import "../../src/mocks/TestERC1967Proxy.sol";
+import "../../src/mocks/MockWBNBUnderpay.sol";
 
 contract TopicAccessManagerUnitTest is TopicAccessFixture {
     function testRambleConstantsAreApplied() external view {
         assertEq(manager.RAMBLE_TOKEN(), address(ramble), "ramble constant mismatch");
+        assertEq(manager.BSC_WBNB(), address(wbnb), "wbnb constant mismatch");
         assertEq(manager.BSC_CHAIN_ID(), 56, "bsc chain id constant mismatch");
         assertEq(
             uint256(manager.getRambleDiscountBps()),
@@ -31,7 +33,7 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
         assertEq(manager.getTopicPriceWad(expected), 100e18, "topic price mismatch");
         assertEq(manager.getTopicCount(), 1, "topic registry count mismatch");
 
-        (bytes32 topicIdAt0, uint256 topicPriceAt0, string memory topicKeyAt0, ) = manager.getTopicAt(0);
+        (bytes32 topicIdAt0, uint256 topicPriceAt0, string memory topicKeyAt0,) = manager.getTopicAt(0);
         assertEq(topicIdAt0, expected, "topic id registry mismatch");
         assertEq(topicPriceAt0, 100e18, "topic price registry mismatch");
         assertEq(keccak256(bytes(topicKeyAt0)), keccak256(bytes(topicKey)), "topic key registry mismatch");
@@ -51,14 +53,10 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
         assertTrue(manager.topicExists(topicId), "topic should still exist");
         assertTrue(manager.hasAccess(topicId, user) == false, "deactivated topic should not grant access");
 
-        vm.expectRevert(
-            abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId)
-        );
+        vm.expectRevert(abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId));
         manager.quoteMinBnbForOneMonth(topicId);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId)
-        );
+        vm.expectRevert(abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId));
         manager.previewTopup(topicId, address(usdc), 100e6);
     }
 
@@ -86,7 +84,7 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
         _createTopic(topicId, 42e18);
         assertEq(manager.getTopicCount(), 1, "topic registry count mismatch");
 
-        (, uint256 priceBefore, string memory keyBefore, ) = manager.getTopicAt(0);
+        (, uint256 priceBefore, string memory keyBefore,) = manager.getTopicAt(0);
         assertEq(priceBefore, 42e18, "topic price should be indexed");
         assertEq(bytes(keyBefore).length, 0, "topic key should be empty before backfill");
 
@@ -274,12 +272,44 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
         uint256 t0 = block.timestamp;
         (, uint256 effectiveValue,) = manager.previewTopup(topicId, address(ramble), minRamble);
         vm.prank(user);
-        uint256 newExpiry =
-            manager.topup(topicId, address(ramble), minRamble, user, effectiveValue, block.timestamp);
+        uint256 newExpiry = manager.topup(topicId, address(ramble), minRamble, user, effectiveValue, block.timestamp);
 
         assertGte(newExpiry, t0 + ONE_MONTH, "ramble expiry should be >= 1 month");
         assertTrue(address(manager).balance > nativeBefore, "ramble topup should swap into native BNB");
         assertEq(ramble.balanceOf(address(manager)), managerRambleBefore, "manager should not retain ramble");
+    }
+
+    function testRambleTopupUsesActualNativeReceivedAfterWithdraw() external {
+        bytes32 topicId = _hashTopic("paid.ramble.native.received");
+        _createTopic(topicId, 50e18);
+
+        MockWBNBUnderpay shortPayTemplate = new MockWBNBUnderpay();
+        vm.etch(address(wbnb), address(shortPayTemplate).code);
+
+        MockPancakePairV2 shortPayPair = new MockPancakePairV2(address(ramble), address(wbnb));
+        uint112 reserveRamble = uint112(1_000_000e18);
+        uint112 reserveWbnb = uint112(10_000e18);
+        shortPayPair.setReserves(reserveRamble, reserveWbnb, uint32(block.timestamp));
+        ramble.mint(address(shortPayPair), reserveRamble);
+        MockWBNB(payable(address(wbnb))).mint(address(shortPayPair), reserveWbnb);
+        vm.deal(address(wbnb), 100_000 ether);
+
+        vm.prank(owner);
+        manager.setRamblePair(address(shortPayPair));
+
+        uint256 minRamble = manager.quoteMinRambleForOneMonth(topicId);
+        (, uint256 previewEffectiveValue,) = manager.previewTopup(topicId, address(ramble), minRamble);
+        _approveAndMint(address(ramble), user, minRamble);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TopicAccessManagerUpgradeable.EffectiveValueBelowMinimum.selector,
+                previewEffectiveValue / 2,
+                previewEffectiveValue
+            )
+        );
+        vm.prank(user);
+        manager.topup(topicId, address(ramble), minRamble, user, previewEffectiveValue, block.timestamp);
     }
 
     function testConfigurable24DecimalsNormalization() external {
@@ -398,11 +428,25 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
         manager.setRamblePair(address(wrongPair));
     }
 
-    function testSetRamblePairRejectsPairWithoutWrappedNativeWithdraw() external {
+    function testSetRamblePairRejectsPairWithoutPinnedWbnb() external {
         MockPancakePairV2 invalidPair = new MockPancakePairV2(address(ramble), address(usdc));
 
         vm.expectRevert(
-            abi.encodeWithSelector(TopicAccessManagerUpgradeable.WrappedNativeWithdrawFailed.selector, address(usdc))
+            abi.encodeWithSelector(
+                TopicAccessManagerUpgradeable.InvalidWrappedNative.selector, address(usdc), address(wbnb)
+            )
+        );
+        vm.prank(owner);
+        manager.setRamblePair(address(invalidPair));
+    }
+
+    function testSetRamblePairRejectsPinnedWbnbWithoutWithdraw() external {
+        MockPancakePairV2 invalidPair = new MockPancakePairV2(address(ramble), address(wbnb));
+
+        vm.etch(address(wbnb), address(usdc).code);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(TopicAccessManagerUpgradeable.WrappedNativeWithdrawFailed.selector, address(wbnb))
         );
         vm.prank(owner);
         manager.setRamblePair(address(invalidPair));

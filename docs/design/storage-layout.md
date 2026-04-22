@@ -21,25 +21,24 @@ forge build --extra-output storageLayout
 forge inspect src/TopicAccessManagerUpgradeable.sol:TopicAccessManagerUpgradeable storage-layout
 ```
 
-## 3. 当前快照（2026-04-06）
+## 3. 当前快照（2026-04-21）
 
-> **OZ v5 存储模型变更说明**：
-> 自升级到 OpenZeppelin v5 后，`Initializable`（`_initialized` / `_initializing`）和
-> `ReentrancyGuard`（`_status`）改用 **ERC-7201 命名空间存储**，不再占用顺序 slot。
-> 因此与 v1.2 快照相比，这三个变量从顺序布局中消失，所有后续变量 slot 前移。
-> **这是首次部署前的布局变更，不影响已部署合约。**
+> **OZ v5 存储模型说明**：
+> `Initializable`（`_initialized` / `_initializing`）在 OZ v5 中改用 **ERC-7201 命名空间存储**，
+> 不再占用顺序 slot；但当前实现使用的是 `@openzeppelin/contracts` 的非 upgradeable
+> `ReentrancyGuard`，其 `_status` 仍然占用顺序 slot 2。
 
 | Name | Type | Slot | Offset | Bytes |
 | --- | --- | --- | --- | --- |
 | `_owner` | `address` | 0 | 0 | 20 |
 | `_pendingOwner` | `address` | 1 | 0 | 20 |
 | `_paused` | `bool` | 1 | 20 | 1 |
-| `_topics` | `mapping(bytes32 => struct Topic)` | 2 | 0 | 32 |
-| `_expiryByTopicUser` | `mapping(bytes32 => mapping(address => uint256))` | 3 | 0 | 32 |
-| `_whitelistByTopicUser` | `mapping(bytes32 => mapping(address => bool))` | 4 | 0 | 32 |
-| `_rambleDiscountBps` | `uint16` | 5 | 0 | 2 |
-| `_executorA` | `address` | 5 | 2 | 20 |
-| `_executorB` | `address` | 6 | 0 | 20 |
+| `_status` | `uint256` | 2 | 0 | 32 |
+| `_topics` | `mapping(bytes32 => struct Topic)` | 3 | 0 | 32 |
+| `_expiryByTopicUser` | `mapping(bytes32 => mapping(address => uint256))` | 4 | 0 | 32 |
+| `_whitelistByTopicUser` | `mapping(bytes32 => mapping(address => bool))` | 5 | 0 | 32 |
+| `_rambleDiscountBps` | `uint16` | 6 | 0 | 2 |
+| `_executor` | `address` | 6 | 2 | 20 |
 | `_usdc` (deprecated) | `address` | 7 | 0 | 20 |
 | `_usdt` (deprecated) | `address` | 8 | 0 | 20 |
 | `_ramble` (deprecated) | `address` | 9 | 0 | 20 |
@@ -60,18 +59,20 @@ forge inspect src/TopicAccessManagerUpgradeable.sol:TopicAccessManagerUpgradeabl
 | `_topicPaymentAllowlistEnabled` | `mapping(bytes32 => bool)` | 21 | 0 | 32 |
 | `_topicPaymentTokenAllowed` | `mapping(bytes32 => mapping(address => bool))` | 22 | 0 | 32 |
 | `_topicDeactivated` | `mapping(bytes32 => bool)` | 23 | 0 | 32 |
-| `__gap` | `uint256[29]` | 24 | 0 | 928 |
+| `__gap` | `uint256[30]` | 24 | 0 | 960 |
 
 ### 3.1 与 v1.2 快照差异摘要
 
 | 变更 | 说明 |
 | --- | --- |
-| 移除 `_initialized`/`_initializing` (旧 slot 0) | OZ v5 Initializable 改用 ERC-7201 命名空间存储 |
-| 移除 `_status` (旧 slot 2) | OZ v5 ReentrancyGuard 改用 ERC-7201 命名空间存储 |
-| 重命名 `_stableTokenEnabled` → `_paymentTokenEnabled` | slot 13（旧 slot 14），功能扩展为通用 payment token |
-| 重命名 `_stableTokenDecimals` → `_paymentTokenDecimals` | slot 14（旧 slot 15），同上 |
+| 移除 `_initialized`/`_initializing` (旧 slot 0) | OZ v5 `Initializable` 改用 ERC-7201 命名空间存储 |
+| 保留 `_status` | 当前使用非 upgradeable `ReentrancyGuard`，`_status` 仍占顺序 slot 2 |
+| `_executorA` → `_executor` | 统一为单 executor 语义，仍位于 slot 6 offset 2 |
+| 删除保留的 legacy executor 槽位 | 首发前清理废弃执行器兼容字段，释放回 `__gap` |
+| 重命名 `_stableTokenEnabled` → `_paymentTokenEnabled` | slot 14，功能扩展为通用 payment token |
+| 重命名 `_stableTokenDecimals` → `_paymentTokenDecimals` | slot 15，同上 |
 | 新增 `_topicDeactivated` | slot 23，支持 topic 停用/激活 |
-| `__gap` 从 `uint256[30]` 缩减为 `uint256[29]` | 消耗 1 gap slot 给 `_topicDeactivated` |
+| `__gap` 保持 `uint256[30]` | 首发前删除 legacy executor 槽位后，释放 1 个顺序 slot 回 `__gap` |
 
 ## 4. 升级约束
 - 只能在末尾（`__gap` 之前）追加新状态变量，同时缩减 `__gap` 大小。

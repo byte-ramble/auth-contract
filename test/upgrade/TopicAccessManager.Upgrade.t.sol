@@ -21,6 +21,9 @@ contract TopicAccessManagerUpgradeTest is TopicAccessFixture {
         vm.prank(owner);
         manager.setTopicPaymentAllowlistEnabled(topicId, true);
 
+        vm.prank(owner);
+        manager.setExecutor(executor);
+
         _approveAndMint(address(usdc), user, 100e6);
 
         vm.prank(user);
@@ -52,6 +55,7 @@ contract TopicAccessManagerUpgradeTest is TopicAccessFixture {
         assertEq(
             upgraded.isTopicPaymentTokenAllowed(topicId, address(usdc)), true, "topic token allowlist should remain"
         );
+        assertEq(upgraded.getExecutor(), executor, "executor should remain");
         assertEq(upgraded.version(), 2, "version should be v2");
 
         vm.prank(owner);

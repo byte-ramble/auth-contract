@@ -13,12 +13,12 @@ import "./TestBase.sol";
 abstract contract TopicAccessFixture is TestBase {
     uint256 internal constant ONE_MONTH = 30 days;
     address internal constant RAMBLE_TOKEN = 0x1A8C391f6c603894108fcE14A52E9Bf804c67777;
+    address internal constant WBNB_TOKEN = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
 
     address internal owner = address(0x1001);
     address internal user = address(0x1002);
     address internal user2 = address(0x1003);
-    address internal executorA = address(0x1004);
-    address internal executorB = address(0x1005);
+    address internal executor = address(0x1004);
     address internal recipient = address(0x1006);
     address internal attacker = address(0x1007);
 
@@ -42,8 +42,7 @@ abstract contract TopicAccessFixture is TestBase {
         vm.deal(owner, 100 ether);
         vm.deal(user, 100 ether);
         vm.deal(user2, 100 ether);
-        vm.deal(executorA, 100 ether);
-        vm.deal(executorB, 100 ether);
+        vm.deal(executor, 100 ether);
         vm.deal(attacker, 100 ether);
 
         usdc = new MockERC20("USD Coin", "USDC", 6);
@@ -51,7 +50,9 @@ abstract contract TopicAccessFixture is TestBase {
         MockERC20 rambleTemplate = new MockERC20("Ramble", "RAMBLE", 18);
         vm.etch(RAMBLE_TOKEN, address(rambleTemplate).code);
         ramble = MockERC20(RAMBLE_TOKEN);
-        wbnb = new MockWBNB();
+        MockWBNB wbnbTemplate = new MockWBNB();
+        vm.etch(WBNB_TOKEN, address(wbnbTemplate).code);
+        wbnb = MockWBNB(payable(WBNB_TOKEN));
         usdc24 = new MockERC20("USD24", "USD24", 24);
 
         oracle = new MockAggregatorV3(8);

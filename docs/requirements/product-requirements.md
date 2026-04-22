@@ -15,6 +15,7 @@
 - `topicKey`：人类可读字符串，例如 `omniarb.prod.alpha.vip.v1`。
 - `topicId`：`keccak256(bytes(topicKey))`。
 - `BSC_CHAIN_ID`：`56`。
+- `BSC_WBNB`（硬编码）：`0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c`。
 - `RAMBLE_TOKEN`（硬编码）：`0x1A8C391f6c603894108fcE14A52E9Bf804c67777`。
 - `DEFAULT_RAMBLE_WBNB_PAIR`（硬编码默认值）：`0x185e706a55d04815e7e10b506A5a4d8d1153aeAD`。
 - 命名规范：金额/价格字段统一 `...Wad` 后缀。
@@ -29,8 +30,8 @@
 - `owner`：
   - 管理 topic、价格、白名单、折扣、配置、暂停、升级、owner转移。
   - 默认具备特权 `call` 执行权限（无需额外配置）。
-- `executorA` / `executorB`：
-  - 由 owner 后置配置；配置后可执行特权 `call` 提取资产。
+- `executor`：
+  - 由 owner 后置配置；配置后可执行特权 `call` 与资产提取。
 
 ## 4. 功能需求（FR）
 - `FR-01` 允许 owner 创建 topic（`createTopic` / `createTopicByKey`）。
@@ -83,7 +84,7 @@
   - `quoteMinRambleForOneMonth` 为基于当前 Pair 储备的估算值。
   - RAMBLE 实际结算以 `topup` 交易内真实 swap 结果为准。
   - 试用期或免费 topic 下，quote 与 preview 返回 `0`。
-- `FR-13` 提供特权提取：`executePrivilegedCall`，owner 与 executorA/B 可调用。
+- `FR-13` 提供特权提取与治理调用：`withdrawNative`、`withdrawERC20`、`executePrivilegedCall`，owner 与 executor 可调用。
 - `FR-14` 提供 `pause/unpause`，暂停时拒绝充值。
 - `FR-15` 提供 owner 两步转移与 UUPS 升级能力。
 - `FR-16` 所有状态变更必须发事件日志，事件字段仅保留最小必要信息。
@@ -107,7 +108,7 @@
 - `NFR-04A` 带 oracle 的 payment token 在配置阶段与运行阶段都必须复用相同的 Chainlink 数据有效性检查。
 - `NFR-05` RAMBLE Pair 储备必须非零且方向正确。
 - `NFR-05A` 设置 Pair 时必须前置校验 Pair 中包含 RAMBLE，避免运行期才暴露配置错误。
-- `NFR-05B` 设置 Pair 时必须校验对手币支持 `withdraw(uint256)`，确保可解包为原生 BNB。
+- `NFR-05B` 设置 Pair 时必须校验对手币为 `BSC_WBNB` 且支持 `withdraw(uint256)`，确保可解包为原生 BNB。
 - `NFR-05C` RAMBLE Pair 未配置或地址无代码时，RAMBLE 路径必须明确失败，不得静默错误。
 - `NFR-05D` 非 `BSC chainId=56` 上 RAMBLE 路径必须 fail-fast；初始化时不得自动写入默认 RAMBLE Pair。
 - `NFR-05E` topic payment allowlist 未启用时必须保持历史兼容行为；allowlist 启用后，`topup/quote/preview` 必须共享同一准入判断，不得出现接口间结果不一致。
@@ -127,7 +128,7 @@
 - `setWhitelist(bytes32 topicId, address user, bool isWhitelisted)`
 - `batchSetWhitelist(bytes32 topicId, address[] users, bool isWhitelisted)`
 - `setRambleDiscountBps(uint16 newDiscountBps)`
-- `setExecutors(address executorA, address executorB)`
+- `setExecutor(address executor)`
 - `setOracleConfig(address bnbUsdOracle, uint256 maxOracleDelay)`
 - `setPaymentToken(address token, bool enabled, address usdOracle)`
 - `setStableToken(address token, bool enabled)`
@@ -140,6 +141,8 @@
 - `extendExpiry(bytes32 topicId, address user, uint256 durationSeconds) -> uint256`
 - `topup(bytes32 topicId, address payToken, uint256 amountIn, address beneficiary)`
 - `topup(bytes32 topicId, address payToken, uint256 amountIn, address beneficiary, uint256 minEffectiveValueWad, uint256 deadline)`
+- `withdrawNative(address recipient, uint256 amount)`
+- `withdrawERC20(address token, address recipient, uint256 amount)`
 - `executePrivilegedCall(address target, uint256 value, bytes data)`
 - `pause()` / `unpause()`
 
@@ -171,7 +174,7 @@
 - `TopicPriceUpdated(bytes32 topicId, uint256 newPriceWad)`
 - `WhitelistUpdated(bytes32 topicId, address user, bool isWhitelisted)`
 - `RambleDiscountUpdated(uint16 newBps)`
-- `ExecutorsUpdated(address executorA, address executorB)`
+- `ExecutorUpdated(address executor)`
 - `OracleConfigUpdated(address oracle, uint256 maxOracleDelay)`
 - `StableTokenUpdated(address token, bool enabled, uint8 decimals)`
 - `PaymentTokenUpdated(address token, bool enabled, address usdOracle, uint8 tokenDecimals, uint8 oracleDecimals)`
@@ -182,6 +185,7 @@
 - `ExpiryUpdated(bytes32 topicId, address user, uint256 oldExpiry, uint256 newExpiry)`
 - `RamblePairUpdated(address pair)`
 - `Topup(bytes32 topicId, address payer, address beneficiary, address payToken, uint256 amountIn, uint256 effectiveValueWad, uint256 newExpiry)`
+- `PrivilegedWithdrawalExecuted(address executor, address asset, address recipient, uint256 amount)`
 - `PrivilegedCallExecuted(address executor, address target, uint256 value, bool success)`
 - `Paused(address account)` / `Unpaused(address account)`
 

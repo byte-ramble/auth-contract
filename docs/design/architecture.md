@@ -40,7 +40,7 @@
 - 初始化精简策略：
   - `initialize` 仅注入 `initialOwner + oracle + delay`。
   - RAMBLE 地址、默认 Pair、默认折扣使用合约常量，不通过初始化传参。
-  - executor 地址通过 `setExecutors` 在部署后由 owner 单独配置。
+  - executor 地址通过 `setExecutor` 在部署后由 owner 单独配置。
   - payment token 通过 `setPaymentToken` / `setStableToken` 后置注册。
   - 试用期通过 `setGlobalTrialEndsAt` / `setTopicTrialEndsAt` 后置配置。
   - topic 级 payment allowlist 与人工订阅期纠偏通过 owner 后置配置。
@@ -82,6 +82,7 @@
 - BNB：`rawValueWad = msg.value * bnbUsdPrice / 10^oracleDecimals`。
 - RAMBLE：
   - 仅在 `BSC chainId=56` 激活；非 BSC 链直接回滚，避免错误暴露为“无流动性”或“pair 未配置”。
+  - Pair 对手币固定为 `BSC_WBNB`，配置阶段同时校验 `withdraw(uint256)` 可调用。
   - 报价阶段：基于 Pair 储备估算 `wbnbOut`，用于 `preview/quote`。
   - 充值阶段：真实执行 `RAMBLE -> WBNB` 的 V2 `swap`，再 `withdraw` 为 BNB。
   - `rawValueWad` 以交易内实际收到的 BNB 计价：
@@ -111,13 +112,14 @@
 ## 7. 风控
 - Chainlink：在 `setOracleConfig` 与运行期查询时都校验正值、时效、round 完整性，并验证地址有代码、接口可读。
 - payment token oracle：在 `setPaymentToken(..., usdOracle)` 与运行期都复用同一组 Chainlink 有效性校验。
-- Pair：配置时先校验包含 RAMBLE，且对手币必须支持 `withdraw(uint256)`；运行时继续校验储备非零、方向匹配、避免除零。
+- Pair：配置时先校验包含 RAMBLE，且对手币必须为 `BSC_WBNB` 并支持 `withdraw(uint256)`；运行时继续校验储备非零、方向匹配、避免除零。
 - Chain 保护：RAMBLE 所有入口先校验 `block.chainid == 56`，避免在非 BSC 链误开支付入口。
 - Topic payment allowlist：作为 topic 级细粒度 kill switch；启用后 `topup/quote/preview` 共享同一准入规则。
 - RAMBLE pair 地址若无代码，RAMBLE 路径显式失败，避免出现不透明 revert。
 - 充值入口 `whenNotPaused`。
 - `topup` / `executePrivilegedCall` 均 `nonReentrant`。
-- 特权调用授权模型：`owner || executorA || executorB`。
+- 特权调用授权模型：`owner || executor`。
+- 标准资产提取走 `withdrawNative/withdrawERC20`；`executePrivilegedCall` 保留给通用治理操作，不再承载 ERC20 `transfer` 出金。
 - 初始化阶段不设置 executor，避免初始化参数膨胀；executor 后续由 owner 配置。
 - 为升级迁移提供只读接口 `getLegacyStableTokens`，读取 deprecated 存储中的旧稳定币地址。
 

@@ -6,7 +6,7 @@
 ```mermaid
 flowchart TD
     A["部署 Deploy.s.sol"] --> B["初始化 initialize(owner, oracle, maxOracleDelay)"]
-    B --> C["后置配置<br/>setExecutors / setPaymentToken / setStableToken / setGlobalTrial / setTopicTrial / setTopicPaymentAllowlist / setTopicPaymentToken / setRamblePair(可选)"]
+    B --> C["后置配置<br/>setExecutor / setPaymentToken / setStableToken / setGlobalTrial / setTopicTrial / setTopicPaymentAllowlist / setTopicPaymentToken / setRamblePair(可选)"]
     C --> D["创建 Topic<br/>createTopic/createTopicByKey"]
     D --> E["用户访问与充值循环"]
     E --> F{"版本升级?"}

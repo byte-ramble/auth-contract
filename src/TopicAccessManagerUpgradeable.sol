@@ -44,6 +44,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     uint256 public constant MAX_BATCH_SIZE = 200;
     uint256 public constant BSC_CHAIN_ID = 56;
 
+    address public constant BSC_WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     address public constant RAMBLE_TOKEN = 0x1A8C391f6c603894108fcE14A52E9Bf804c67777;
     address public constant DEFAULT_RAMBLE_WBNB_PAIR = 0x185e706a55d04815e7e10b506A5a4d8d1153aeAD;
     uint16 public constant DEFAULT_RAMBLE_DISCOUNT_BPS = 9500;
@@ -58,8 +59,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
 
     uint16 private _rambleDiscountBps;
 
-    address private _executorA;
-    address private _executorB;
+    address private _executor;
 
     // Deprecated legacy token config storage (kept for upgrade-safe layout).
     address private _usdc;
@@ -89,7 +89,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
 
     mapping(bytes32 => bool) private _topicDeactivated;
 
-    uint256[29] private __gap;
+    uint256[30] private __gap;
 
     error ZeroAddress();
     error EmptyTopicKey();
@@ -122,6 +122,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     error TopicKeyMismatch(bytes32 topicId, bytes32 derivedTopicId);
     error TopicIndexOutOfBounds(uint256 index, uint256 count);
     error PairTokenMismatch(address token0, address token1, address ramble);
+    error InvalidWrappedNative(address wrappedNative, address expectedWrappedNative);
     error RamblePairNotConfigured(address pair);
     error PairLiquidityTooLow();
     error WrappedNativeWithdrawFailed(address wrappedNative);
@@ -130,6 +131,8 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     error TopicIsDeactivated(bytes32 topicId);
     error TopicAlreadyActive(bytes32 topicId);
     error BatchSizeExceeded(uint256 provided, uint256 max);
+    error NativeWithdrawalFailed(address recipient);
+    error UseWithdrawERC20(address token);
 
     event TopicCreated(bytes32 indexed topicId, uint256 monthlyPriceWad);
     event TopicKeyRegistered(bytes32 indexed topicId, string topicKey);
@@ -138,7 +141,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
 
     event RambleDiscountUpdated(uint16 newBps);
 
-    event ExecutorsUpdated(address indexed executorA, address indexed executorB);
+    event ExecutorUpdated(address indexed executor);
 
     event OracleConfigUpdated(address indexed oracle, uint256 maxOracleDelay);
 
@@ -165,6 +168,9 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     );
 
     event PrivilegedCallExecuted(address indexed executor, address indexed target, uint256 value, bool success);
+    event PrivilegedWithdrawalExecuted(
+        address indexed executor, address indexed asset, address indexed recipient, uint256 amount
+    );
 
     event TopicDeactivated(bytes32 indexed topicId);
     event TopicReactivated(bytes32 indexed topicId);
@@ -302,11 +308,10 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         _setRambleDiscountBps(newDiscountBps);
     }
 
-    function setExecutors(
-        address executorA_,
-        address executorB_
+    function setExecutor(
+        address executor_
     ) external onlyOwner {
-        _setExecutors(executorA_, executorB_);
+        _setExecutor(executor_);
     }
 
     function setOracleConfig(
@@ -511,10 +516,43 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         if (target == address(0) || target == address(this)) {
             revert InvalidPrivilegedTarget(target);
         }
+        if (target.code.length != 0 && _selectorFromCalldata(data) == IERC20.transfer.selector) {
+            revert UseWithdrawERC20(target);
+        }
 
         (success, returnData) = target.call{ value: value }(data);
 
         emit PrivilegedCallExecuted(msg.sender, target, value, success);
+    }
+
+    function withdrawNative(
+        address recipient,
+        uint256 amount
+    ) external nonReentrant onlyPrivilegedCaller {
+        if (recipient == address(0)) {
+            revert ZeroAddress();
+        }
+
+        (bool ok,) = payable(recipient).call{ value: amount }("");
+        if (!ok) {
+            revert NativeWithdrawalFailed(recipient);
+        }
+
+        emit PrivilegedWithdrawalExecuted(msg.sender, address(0), recipient, amount);
+    }
+
+    function withdrawERC20(
+        address token,
+        address recipient,
+        uint256 amount
+    ) external nonReentrant onlyPrivilegedCaller {
+        if (token == address(0) || recipient == address(0)) {
+            revert ZeroAddress();
+        }
+
+        IERC20(token).safeTransfer(recipient, amount);
+
+        emit PrivilegedWithdrawalExecuted(msg.sender, token, recipient, amount);
     }
 
     function getExpiry(
@@ -587,8 +625,8 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         topicKey = _topicKeyById[topicId];
     }
 
-    function getExecutors() external view returns (address executorA, address executorB) {
-        return (_executorA, _executorB);
+    function getExecutor() external view returns (address executor) {
+        return _executor;
     }
 
     function getPaymentTokenConfig(
@@ -751,14 +789,12 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         emit RambleDiscountUpdated(newDiscountBps);
     }
 
-    function _setExecutors(
-        address executorA_,
-        address executorB_
+    function _setExecutor(
+        address executor_
     ) internal {
-        _executorA = executorA_;
-        _executorB = executorB_;
+        _executor = executor_;
 
-        emit ExecutorsUpdated(executorA_, executorB_);
+        emit ExecutorUpdated(executor_);
     }
 
     function _setOracleConfig(
@@ -868,7 +904,14 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
             wrappedNative = token0;
         }
 
-        // Ensure the counter token can be unwrapped into native BNB.
+        if (wrappedNative != BSC_WBNB) {
+            revert InvalidWrappedNative(wrappedNative, BSC_WBNB);
+        }
+        if (wrappedNative.code.length == 0) {
+            revert WrappedNativeWithdrawFailed(wrappedNative);
+        }
+
+        // Ensure the pinned wrapped native token still exposes the unwrap entrypoint.
         (bool canWithdraw,) = wrappedNative.call(abi.encodeWithSignature("withdraw(uint256)", 0));
         if (!canWithdraw) {
             revert WrappedNativeWithdrawFailed(wrappedNative);
@@ -1049,12 +1092,17 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
             revert PairLiquidityTooLow();
         }
 
+        uint256 nativeBalanceBefore = address(this).balance;
         (bool ok,) = wrappedNative.call(abi.encodeWithSignature("withdraw(uint256)", wrappedReceived));
         if (!ok) {
             revert WrappedNativeWithdrawFailed(wrappedNative);
         }
+        uint256 nativeReceived = address(this).balance - nativeBalanceBefore;
+        if (nativeReceived == 0) {
+            revert WrappedNativeWithdrawFailed(wrappedNative);
+        }
 
-        uint256 rawValueWad = _quoteBnbValueWad(wrappedReceived);
+        uint256 rawValueWad = _quoteBnbValueWad(nativeReceived);
         effectiveValueWad = Math.mulDiv(rawValueWad, BPS_BASE, _rambleDiscountBps);
     }
 
@@ -1253,8 +1301,20 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         }
     }
 
+    function _selectorFromCalldata(
+        bytes calldata data
+    ) internal pure returns (bytes4 selector) {
+        if (data.length < 4) {
+            return bytes4(0);
+        }
+
+        assembly {
+            selector := calldataload(data.offset)
+        }
+    }
+
     modifier onlyPrivilegedCaller() {
-        if (msg.sender != owner() && msg.sender != _executorA && msg.sender != _executorB) {
+        if (msg.sender != owner() && msg.sender != _executor) {
             revert NotExecutor(msg.sender);
         }
         _;

@@ -1,27 +1,31 @@
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import fs from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
+import {
+    primeDeployerPrivateKey,
+    readCleanValue,
+    readConfiguredDeployPrivateKey,
+    readConfiguredKeystorePath,
+    unlockDeployerWalletOnce,
+} from './deployer-unlock.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const MONOREPO_ROOT = path.resolve(PROJECT_ROOT, '../..');
-const KEYSTORE_UTIL_PATH = path.resolve(
-    MONOREPO_ROOT,
-    'packages/lp-manager/src/lib/wallet/walletUtlis.js',
-);
 
-// Lazy-loaded ethers (avoid ESM/CJS interop issues)
-let _ethers = null;
-async function getEthers() {
-    if (_ethers) return _ethers;
-    // ethers v5 CJS — dynamic import exposes named exports directly
-    const mod = await import(pathToFileURL(path.join(MONOREPO_ROOT, 'node_modules/ethers/lib/ethers.js')).href);
-    // CJS interop: Wallet is a named export
-    _ethers = { Wallet: mod.Wallet };
-    return _ethers;
-}
+const BSC_MAINNET_CHAIN_ID = 56;
+const BSC_TESTNET_CHAIN_ID = 97;
+const BSC_NETWORKS = new Map([
+    [BSC_MAINNET_CHAIN_ID, { chainId: BSC_MAINNET_CHAIN_ID, label: 'bsc', deploymentFile: 'bsc.json', verifyChain: 'bsc' }],
+    [
+        BSC_TESTNET_CHAIN_ID,
+        { chainId: BSC_TESTNET_CHAIN_ID, label: 'bsc-testnet', deploymentFile: 'bsc-testnet.json', verifyChain: 'bsc-testnet' },
+    ],
+]);
+
+let cachedResolvedNetwork = null;
 
 // ---------------------------------------------------------------------------
 // Env loading
@@ -44,46 +48,106 @@ export async function loadEnv() {
 // ---------------------------------------------------------------------------
 
 export function readClean(value) {
-    if (!value) return undefined;
-    let text = String(value).trim();
-    // strip inline comments
-    text = text.replace(/\s+(\/\/|#).*$/, '').trim();
-    if (text.endsWith(';')) text = text.slice(0, -1).trim();
-    if ((text.startsWith("'") && text.endsWith("'")) || (text.startsWith('"') && text.endsWith('"'))) {
-        text = text.slice(1, -1).trim();
-    }
-    return text || undefined;
+    return readCleanValue(value);
 }
 
-/**
- * Unlock deployer wallet.
- * Priority: DEPLOY_KEYSTORE_PATH (interactive) > DEPLOY_PRIVATE_KEY (direct)
- */
+async function loadWalletFromKeystore(keystorePath) {
+    if (!fs.existsSync(keystorePath)) {
+        throw new Error(`Keystore not found: ${keystorePath}`);
+    }
+    const mod = await import('@omniarb/lp-manager/lib/wallet');
+    return mod.cmdOpen(keystorePath);
+}
+
 export async function unlockWallet() {
-    const keystorePath = readClean(process.env.DEPLOY_KEYSTORE_PATH);
-    const directKey = readClean(process.env.DEPLOY_PRIVATE_KEY);
+    const wallet = await unlockDeployerWalletOnce({
+        env: process.env,
+        loadWalletFromKeystore,
+    });
+    if (!wallet) {
+        throw new Error(
+            'No deployer wallet configured. Set AUTH_DEPLOY_KEYSTORE_PATH/AUTH_DEPLOY_PRIVATE_KEY, DEPLOY_KEYSTORE_PATH/DEPLOY_PRIVATE_KEY, or OMNIX_DEPLOY_KEYSTORE_PATH/OMNIX_DEPLOY_PRIVATE_KEY in .env',
+        );
+    }
 
-    if (keystorePath) {
-        if (!fs.existsSync(keystorePath)) {
-            throw new Error(`Keystore not found: ${keystorePath}`);
-        }
-        const mod = await import(pathToFileURL(KEYSTORE_UTIL_PATH).href);
-        const wallet = await mod.cmdOpen(keystorePath);
-        if (!wallet || !wallet.privateKey) {
-            throw new Error('Keystore unlock failed — no wallet returned');
-        }
+    if (readConfiguredKeystorePath(process.env)) {
         console.log(`[deploy] unlocked ${wallet.address} from keystore`);
-        return wallet;
-    }
-
-    if (directKey) {
-        const ethers = await getEthers();
-        const wallet = new ethers.Wallet(directKey);
+    } else if (readConfiguredDeployPrivateKey(process.env)) {
         console.log(`[deploy] using direct key for ${wallet.address}`);
-        return wallet;
     }
 
-    throw new Error('No deployer wallet configured. Set DEPLOY_KEYSTORE_PATH or DEPLOY_PRIVATE_KEY in .env');
+    return wallet;
+}
+
+export async function primeFoundryPrivateKey(action) {
+    return primeDeployerPrivateKey({
+        action,
+        env: process.env,
+        loadWalletFromKeystore,
+        setEnv: (key, value) => {
+            process.env[key] = value;
+        },
+    });
+}
+
+export function getRpcUrl() {
+    const rpcUrl = readClean(process.env.BSC_RPC_URL) || readClean(process.env.RPC_URL);
+    if (!rpcUrl) {
+        throw new Error('BSC_RPC_URL not set');
+    }
+    return rpcUrl;
+}
+
+function detectChainId(rpcUrl) {
+    const result = execFileSync('cast', ['chain-id', '--rpc-url', rpcUrl], {
+        cwd: PROJECT_ROOT,
+        encoding: 'utf8',
+        timeout: 15_000,
+    }).trim();
+    const chainId = Number(result);
+    if (!Number.isInteger(chainId) || chainId <= 0) {
+        throw new Error(`Invalid chain id returned by RPC: ${result}`);
+    }
+    return chainId;
+}
+
+export function resolveBscNetwork() {
+    const rpcUrl = getRpcUrl();
+    if (cachedResolvedNetwork && cachedResolvedNetwork.rpcUrl === rpcUrl) {
+        return cachedResolvedNetwork;
+    }
+
+    const chainId = detectChainId(rpcUrl);
+    const network = BSC_NETWORKS.get(chainId);
+    if (!network) {
+        throw new Error(`Unsupported BSC deployment chain id: ${chainId}. Expected 56 (mainnet) or 97 (testnet).`);
+    }
+
+    cachedResolvedNetwork = {
+        ...network,
+        rpcUrl,
+        deploymentFilePath: path.join(PROJECT_ROOT, 'deployments', network.deploymentFile),
+    };
+    return cachedResolvedNetwork;
+}
+
+export function readMinDeployerBnb() {
+    const raw = readClean(process.env.MIN_DEPLOYER_BNB);
+    if (!raw) return 0.01;
+
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`Invalid MIN_DEPLOYER_BNB: ${raw}`);
+    }
+    return value;
+}
+
+export function readDeployConfigFromEnv() {
+    return {
+        owner: readClean(process.env.OWNER),
+        bnbUsdOracle: readClean(process.env.BNB_USD_ORACLE),
+        maxOracleDelay: readClean(process.env.MAX_ORACLE_DELAY),
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -95,13 +159,11 @@ export async function unlockWallet() {
  * @param {string} scriptPath - relative path from project root, e.g. "script/Deploy.s.sol"
  * @param {object} opts
  * @param {string} opts.privateKey - deployer private key
+ * @param {string} opts.rpcUrl - rpc url
  * @param {string[]} [opts.extraArgs] - additional forge script args
  * @param {boolean} [opts.dryRun] - if true, print command without executing
  */
-export function runForgeScript(scriptPath, { privateKey, extraArgs = [], dryRun = false }) {
-    const rpcUrl = readClean(process.env.BSC_RPC_URL);
-    if (!rpcUrl) throw new Error('BSC_RPC_URL not set');
-
+export function runForgeScript(scriptPath, { privateKey, rpcUrl, extraArgs = [], dryRun = false }) {
     const args = [
         'forge', 'script', scriptPath,
         '--rpc-url', rpcUrl,
@@ -132,29 +194,28 @@ export function runForgeScript(scriptPath, { privateKey, extraArgs = [], dryRun 
 // ---------------------------------------------------------------------------
 
 const DEPLOYMENTS_DIR = path.join(PROJECT_ROOT, 'deployments');
-const DEPLOYMENT_FILE = path.join(DEPLOYMENTS_DIR, 'bsc.json');
 
-export function readDeploymentState() {
-    if (!fs.existsSync(DEPLOYMENT_FILE)) return {};
-    return JSON.parse(fs.readFileSync(DEPLOYMENT_FILE, 'utf8'));
+export function readDeploymentState(network = resolveBscNetwork()) {
+    if (!fs.existsSync(network.deploymentFilePath)) return {};
+    return JSON.parse(fs.readFileSync(network.deploymentFilePath, 'utf8'));
 }
 
-export function writeDeploymentState(state) {
+export function writeDeploymentState(state, network = resolveBscNetwork()) {
     if (!fs.existsSync(DEPLOYMENTS_DIR)) {
         fs.mkdirSync(DEPLOYMENTS_DIR, { recursive: true });
     }
-    fs.writeFileSync(DEPLOYMENT_FILE, JSON.stringify(state, null, 2) + '\n');
+    fs.writeFileSync(network.deploymentFilePath, JSON.stringify(state, null, 2) + '\n');
 }
 
 /**
  * Parse forge script broadcast output to extract deployed addresses.
  * Reads the latest run-*.json from broadcast/ directory.
  */
-export function extractBroadcastAddresses(scriptName) {
+export function extractBroadcastAddresses(scriptName, network = resolveBscNetwork()) {
     const broadcastDir = path.join(PROJECT_ROOT, 'broadcast', scriptName);
     if (!fs.existsSync(broadcastDir)) return null;
 
-    const chainDir = path.join(broadcastDir, '56'); // BSC chain ID
+    const chainDir = path.join(broadcastDir, String(network.chainId));
     if (!fs.existsSync(chainDir)) return null;
 
     const files = fs.readdirSync(chainDir)
@@ -175,17 +236,17 @@ export function extractBroadcastAddresses(scriptName) {
 /**
  * Check deployer BNB balance before deployment.
  * @param {string} address - deployer address
- * @param {number} [minBnb=0.01] - minimum required BNB balance
+ * @param {object} opts
+ * @param {string} opts.rpcUrl
+ * @param {number} [opts.minBnb=0.01] - minimum required BNB balance
  */
-export function checkDeployerBalance(address, minBnb = 0.01) {
-    const rpcUrl = readClean(process.env.BSC_RPC_URL);
-    if (!rpcUrl) return; // skip if no RPC configured
-
+export function checkDeployerBalance(address, { rpcUrl, minBnb = 0.01 }) {
     try {
-        const result = execSync(
-            `cast balance ${address} --rpc-url ${rpcUrl}`,
-            { cwd: PROJECT_ROOT, encoding: 'utf8', timeout: 15_000 },
-        ).trim();
+        const result = execFileSync('cast', ['balance', address, '--rpc-url', rpcUrl], {
+            cwd: PROJECT_ROOT,
+            encoding: 'utf8',
+            timeout: 15_000,
+        }).trim();
 
         const balanceWei = BigInt(result);
         const balanceEth = Number(balanceWei) / 1e18;
@@ -208,9 +269,10 @@ export function checkDeployerBalance(address, minBnb = 0.01) {
  * Verify contract on BSCScan.
  * @param {string} contractAddress - deployed contract address
  * @param {string} contractPath - e.g. "src/TopicAccessManagerUpgradeable.sol:TopicAccessManagerUpgradeable"
+ * @param {object} opts
  * @param {string[]} [constructorArgs] - constructor arguments (if any)
  */
-export function verifyContract(contractAddress, contractPath, constructorArgs = []) {
+export function verifyContract(contractAddress, contractPath, { constructorArgs = [], network = resolveBscNetwork() } = {}) {
     const apiKey = readClean(process.env.BSCSCAN_API_KEY);
     if (!apiKey) {
         console.warn('[verify] WARNING: BSCSCAN_API_KEY not set, skipping verification');
@@ -221,7 +283,7 @@ export function verifyContract(contractAddress, contractPath, constructorArgs = 
         'forge', 'verify-contract',
         contractAddress,
         contractPath,
-        '--chain', 'bsc',
+        '--chain', network.verifyChain,
         '--etherscan-api-key', apiKey,
         '--watch',
     ];
@@ -243,6 +305,31 @@ export function verifyContract(contractAddress, contractPath, constructorArgs = 
     } catch (err) {
         console.warn(`[verify] WARNING: verification failed for ${contractAddress}: ${err.message}`);
     }
+}
+
+export function encodeInitializerCalldata(owner, bnbUsdOracle, maxOracleDelay) {
+    return execFileSync(
+        'cast',
+        ['calldata', 'initialize(address,address,uint256)', owner, bnbUsdOracle, String(maxOracleDelay)],
+        {
+            cwd: PROJECT_ROOT,
+            encoding: 'utf8',
+            timeout: 15_000,
+        },
+    ).trim();
+}
+
+export function encodeProxyConstructorArgs(implementation, owner, bnbUsdOracle, maxOracleDelay) {
+    const initData = encodeInitializerCalldata(owner, bnbUsdOracle, maxOracleDelay);
+    return execFileSync(
+        'cast',
+        ['abi-encode', 'constructor(address,bytes)', implementation, initData],
+        {
+            cwd: PROJECT_ROOT,
+            encoding: 'utf8',
+            timeout: 15_000,
+        },
+    ).trim();
 }
 
 // ---------------------------------------------------------------------------

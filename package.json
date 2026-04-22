@@ -11,16 +11,23 @@
     "test:lifecycle": "forge test --offline --match-path \"test/lifecycle/*.t.sol\" -vv",
     "test:fuzz": "forge test --offline --match-path \"test/fuzz/*.t.sol\" -vv",
     "test:fork": "forge test --match-path \"test/fork/*.t.sol\" -vv",
+    "test:deploy-scripts": "node --test deploy/*.test.mjs",
     "check:security": "npm run test:security && npm run test:upgrade && npm run test:lifecycle && npm run test:fuzz",
     "ci": "npm run fmt:check && npm run build && npm run test && forge coverage --offline --report summary",
     "deploy": "node deploy/deploy.mjs --action deploy",
     "deploy:dry": "node deploy/deploy.mjs --action deploy --dry-run",
     "deploy:configure": "node deploy/deploy.mjs --action configure",
+    "deploy:set-executor": "node deploy/deploy.mjs --action set-executor",
     "deploy:upgrade": "node deploy/deploy.mjs --action upgrade",
     "deploy:upgrade:migrate": "node deploy/deploy.mjs --action upgrade-and-migrate",
+    "deploy:wallet": "node deploy/deploy.mjs --action wallet-address",
     "deploy:verify": "node deploy/deploy.mjs --action verify",
     "fmt": "forge fmt",
     "fmt:check": "forge fmt --check",
     "clean": "forge clean"
+  },
+  "dependencies": {
+    "@omniarb/lp-manager": "file:../lp-manager",
+    "@openzeppelin/contracts": "5.0.2"
   }
 }

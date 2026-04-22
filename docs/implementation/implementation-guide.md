@@ -139,7 +139,7 @@ packages/auth-contract/
 3. 升级：`forge script script/Upgrade.s.sol --rpc-url <RPC> --broadcast`
 4. 升级并自动迁移旧稳定币（旧版推荐）：`forge script script/UpgradeAndMigrate.s.sol --rpc-url <RPC> --broadcast`
 5. 部署后按需执行：
-   - `setExecutors(executorA, executorB)`
+   - `setExecutor(executor)`
    - `setPaymentToken(token, true, usdOracle)`（如 WETH/WBNB/BTCB）
    - `setStableToken(stableToken, true)`
    - `setGlobalTrialEndsAt(trialEndsAt)` / `setTopicTrialEndsAt(topicId, trialEndsAt)`
@@ -159,7 +159,7 @@ packages/auth-contract/
 
 ## 7. 安全检查清单
 - onlyOwner 边界。
-- 特权调用授权边界（owner / executorA / executorB）。
+- 特权调用授权边界（owner / executor）。
 - `nonReentrant` 对重入攻击路径有效。
 - oracle stale / invalid round 拒绝。
 - free topic & whitelist 不可误收费。

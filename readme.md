@@ -33,7 +33,7 @@
 - 支付代币配置：启用时自动读取链上 decimals 并校验上限；带 oracle 的 token 在配置时做前置体检
 - Oracle 配置：`setOracleConfig` 会前置校验 oracle 地址、接口与当前数据有效性
 - 升级模式：UUPS（`ERC1967Proxy + upgradeTo`）
-- 特权调用：owner 默认可调用；executorA/executorB 通过 `setExecutors` 后置配置
+- 特权提取：owner 默认可调用；单一 `executor` 通过 `setExecutor` 后置配置；标准资产提取走 `withdrawNative/withdrawERC20`
 - BSC 主网样例已覆盖 `WETH/USDT/USDC/WBNB/BTCB` + 对应 USD oracle 的 fork 用例
 - CI：内置 GitHub Actions；本地 `npm run ci` 与 Actions 对齐执行 `fmt/build/test/coverage`
 

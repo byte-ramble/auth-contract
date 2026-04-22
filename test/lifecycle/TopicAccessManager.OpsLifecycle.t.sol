@@ -2,6 +2,7 @@
 pragma solidity ^0.8.19;
 
 import "../base/TopicAccessFixture.sol";
+import "../../src/mocks/TopicAccessManagerLegacySeeder.sol";
 import "../../src/mocks/TopicAccessManagerUpgradeableV2.sol";
 
 contract TopicAccessManagerOpsLifecycleTest is TopicAccessFixture {
@@ -11,23 +12,21 @@ contract TopicAccessManagerOpsLifecycleTest is TopicAccessFixture {
         bytes32 paidTopicId = _hashTopic("ops.lifecycle.paid");
         bytes32 freeTopicId = _hashTopic("ops.lifecycle.free");
 
-        _configureExecutorsAndTopics(paidTopicId, freeTopicId);
+        _configureExecutorAndTopics(paidTopicId, freeTopicId);
         uint256 expiryAfterUsdc = _runStableAndFreeTopicChecks(paidTopicId, freeTopicId);
         uint256 expiryAfterRamble = _runPauseAndMultiTokenTopups(paidTopicId, expiryAfterUsdc);
         _runPrivilegedCallFlow();
         _runUpgradeAndMigrationFlow(paidTopicId, expiryAfterRamble);
     }
 
-    function _configureExecutorsAndTopics(
+    function _configureExecutorAndTopics(
         bytes32 paidTopicId,
         bytes32 freeTopicId
     ) internal {
         vm.prank(owner);
-        manager.setExecutors(executorA, executorB);
+        manager.setExecutor(executor);
 
-        (address configuredA, address configuredB) = manager.getExecutors();
-        assertEq(configuredA, executorA, "executorA should be set");
-        assertEq(configuredB, executorB, "executorB should be set");
+        assertEq(manager.getExecutor(), executor, "executor should be set");
 
         _createTopic(paidTopicId, PAID_MONTHLY_PRICE_WAD);
         _createTopic(freeTopicId, 0);
@@ -86,13 +85,19 @@ contract TopicAccessManagerOpsLifecycleTest is TopicAccessFixture {
 
     function _runPrivilegedCallFlow() internal {
         vm.deal(address(manager), 0.15 ether);
+        usdc.mint(address(manager), 25e6);
         uint256 beforeRecipientBalance = recipient.balance;
+        uint256 beforeRecipientUsdcBalance = usdc.balanceOf(recipient);
 
-        vm.prank(executorA);
-        (bool callSuccess,) = manager.executePrivilegedCall(recipient, 0.15 ether, "");
+        vm.prank(executor);
+        manager.withdrawNative(recipient, 0.15 ether);
 
-        assertTrue(callSuccess, "executor privileged call should succeed");
         assertEq(recipient.balance - beforeRecipientBalance, 0.15 ether, "recipient should receive native token");
+
+        vm.prank(executor);
+        manager.withdrawERC20(address(usdc), recipient, 25e6);
+
+        assertEq(usdc.balanceOf(recipient) - beforeRecipientUsdcBalance, 25e6, "recipient should receive usdc");
     }
 
     function _runUpgradeAndMigrationFlow(
@@ -109,11 +114,21 @@ contract TopicAccessManagerOpsLifecycleTest is TopicAccessFixture {
         assertFalse(usdcEnabledBefore, "usdc should be disabled before migration");
         assertFalse(usdtEnabledBefore, "usdt should be disabled before migration");
 
-        _setLegacyStableSlots(address(usdc), address(usdt));
+        TopicAccessManagerLegacySeeder seederImplementation = new TopicAccessManagerLegacySeeder();
+        vm.prank(owner);
+        manager.upgradeToAndCall(address(seederImplementation), "");
+
+        TopicAccessManagerLegacySeeder seeded = TopicAccessManagerLegacySeeder(payable(address(manager)));
+        vm.prank(owner);
+        seeded.seedLegacyStableTokens(address(usdc), address(usdt));
+
+        (address seededUsdc, address seededUsdt) = seeded.getLegacyStableTokens();
+        assertEq(seededUsdc, address(usdc), "legacy usdc should be seeded before migration");
+        assertEq(seededUsdt, address(usdt), "legacy usdt should be seeded before migration");
 
         TopicAccessManagerUpgradeableV2 newImplementation = new TopicAccessManagerUpgradeableV2();
         vm.prank(owner);
-        manager.upgradeToAndCall(address(newImplementation), "");
+        seeded.upgradeToAndCall(address(newImplementation), "");
 
         TopicAccessManagerUpgradeableV2 upgraded = TopicAccessManagerUpgradeableV2(payable(address(manager)));
         assertEq(upgraded.version(), 2, "should upgrade to v2");
@@ -145,15 +160,6 @@ contract TopicAccessManagerOpsLifecycleTest is TopicAccessFixture {
         uint256 expiryAfterUpgradeTopup = upgraded.getExpiry(paidTopicId, user);
         assertTrue(expiryAfterUpgradeTopup > expectedExpiryBeforeUpgrade, "topup should continue after upgrade");
         assertTrue(upgraded.hasAccess(paidTopicId, user), "access should remain valid");
-    }
-
-    function _setLegacyStableSlots(
-        address legacyUsdc,
-        address legacyUsdt
-    ) internal {
-        // Storage slots from layout: _usdc at slot 7, _usdt at slot 8 (OZ v5 compact packing).
-        vm.store(address(manager), bytes32(uint256(7)), bytes32(uint256(uint160(legacyUsdc))));
-        vm.store(address(manager), bytes32(uint256(8)), bytes32(uint256(uint160(legacyUsdt))));
     }
 
     function _enableLegacyStableIfNeeded(
