@@ -31,6 +31,7 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
 
         assertEq(manager.topicExists(expected), true, "topic not created");
         assertEq(manager.getTopicPriceWad(expected), 100e18, "topic price mismatch");
+        assertEq(manager.getTopicAnnualPriceWad(expected), 1200e18, "default annual price mismatch");
         assertEq(manager.getTopicCount(), 1, "topic registry count mismatch");
 
         (bytes32 topicIdAt0, uint256 topicPriceAt0, string memory topicKeyAt0,) = manager.getTopicAt(0);
@@ -57,7 +58,23 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
         manager.quoteMinBnbForOneMonth(topicId);
 
         vm.expectRevert(abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId));
+        manager.quoteMinBnbForAnnual(topicId);
+
+        vm.expectRevert(abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId));
         manager.previewTopup(topicId, address(usdc), 100e6);
+    }
+
+    function testTopicDeactivationBlocksExistingMemberAccess() external {
+        bytes32 topicId = _hashTopic("deactivated.member.topic");
+        _createTopic(topicId, 100e18);
+
+        vm.prank(owner);
+        manager.setExpiry(topicId, user, block.timestamp + 30 days);
+        assertEq(manager.hasAccess(topicId, user), true, "member should have access before deactivation");
+
+        vm.prank(owner);
+        manager.deactivateTopic(topicId);
+        assertEq(manager.hasAccess(topicId, user), false, "deactivated topic should block existing members");
     }
 
     function testTopicReactivationRestoresFunctionality() external {
@@ -110,12 +127,19 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
         assertEq(manager.hasAccess(topicId, user), true, "free topic should grant access");
         assertEq(manager.quoteMinBnbForOneMonth(topicId), 0, "free topic bnb quote should be zero");
         assertEq(manager.quoteMinRambleForOneMonth(topicId), 0, "free topic ramble quote should be zero");
+        assertEq(manager.quoteMinBnbForAnnual(topicId), 0, "free topic annual bnb quote should be zero");
 
         vm.expectRevert(
             abi.encodeWithSelector(TopicAccessManagerUpgradeable.FreeTopicNoPaymentRequired.selector, topicId)
         );
         vm.prank(user);
         manager.topup{ value: 1 ether }(topicId, address(0), 1 ether, user);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(TopicAccessManagerUpgradeable.FreeTopicNoPaymentRequired.selector, topicId)
+        );
+        vm.prank(user);
+        manager.topupAnnual{ value: 1 ether }(topicId, address(0), 1 ether, user, 1, block.timestamp);
     }
 
     function testTopicTrialGrantsAccessAndBlocksPaymentUntilExpiry() external {
@@ -130,6 +154,7 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
         assertEq(manager.hasAccess(topicId, user), true, "trial should grant access");
         assertEq(manager.getEffectiveTrialEndsAt(topicId), trialEndsAt, "trial end mismatch");
         assertEq(manager.quoteMinBnbForOneMonth(topicId), 0, "trial bnb quote should be zero");
+        assertEq(manager.quoteMinBnbForAnnual(topicId), 0, "trial annual bnb quote should be zero");
         assertEq(manager.quoteMinTokenForOneMonth(topicId, address(usdc)), 0, "trial token quote should be zero");
 
         vm.expectRevert(
@@ -139,6 +164,14 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
         );
         vm.prank(user);
         manager.topup(topicId, address(usdc), 100e6, user);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TopicAccessManagerUpgradeable.TrialPeriodNoPaymentRequired.selector, topicId, trialEndsAt
+            )
+        );
+        vm.prank(user);
+        manager.topupAnnual(topicId, address(usdc), 1200e6, user, 1, block.timestamp);
 
         vm.warp(trialEndsAt + 1);
         assertEq(manager.hasAccess(topicId, user), false, "trial access should expire");
@@ -181,12 +214,48 @@ contract TopicAccessManagerUnitTest is TopicAccessFixture {
 
         uint256 minUsdc = manager.quoteMinTokenForOneMonth(topicId, address(usdc));
         assertEq(minUsdc, 100e6, "usdc quote should still work");
+        assertEq(manager.quoteMinTokenForAnnual(topicId, address(usdc)), 1200e6, "annual usdc quote should work");
 
         _approveAndMint(address(usdc), user, minUsdc);
         vm.prank(user);
         uint256 newExpiry = manager.topup(topicId, address(usdc), minUsdc, user);
 
         assertEq(newExpiry, block.timestamp + ONE_MONTH, "allowed token should top up");
+    }
+
+    function testSetTopicAnnualPriceAndAnnualTopup() external {
+        bytes32 topicId = _hashTopic("opland.membership");
+        _createTopic(topicId, 49e18);
+
+        vm.prank(owner);
+        manager.setTopicAnnualPrice(topicId, 499e18);
+
+        assertEq(manager.getTopicPriceWad(topicId), 49e18, "monthly price mismatch");
+        assertEq(manager.getTopicAnnualPriceWad(topicId), 499e18, "annual price mismatch");
+
+        uint256 minUsdc = manager.quoteMinTokenForAnnual(topicId, address(usdc));
+        assertEq(minUsdc, 499e6, "annual usdc quote mismatch");
+
+        (, uint256 effectiveValueWad, uint256 secondsAdded) =
+            manager.previewAnnualTopup(topicId, address(usdc), minUsdc);
+        assertEq(effectiveValueWad, 499e18, "annual effective value mismatch");
+        assertEq(secondsAdded, manager.ONE_YEAR(), "annual preview seconds mismatch");
+
+        _approveAndMint(address(usdc), user, minUsdc);
+        uint256 t0 = block.timestamp;
+        vm.prank(user);
+        uint256 newExpiry = manager.topupAnnual(topicId, address(usdc), minUsdc, user, 499e18, block.timestamp);
+
+        assertEq(newExpiry, t0 + manager.ONE_YEAR(), "annual topup should add one year");
+        assertEq(manager.hasAccess(topicId, user), true, "annual member should have access");
+    }
+
+    function testAnnualPriceDefaultsToTwelveMonthlyPrices() external {
+        bytes32 topicId = _hashTopic("annual.default");
+        _createTopic(topicId, 50e18);
+
+        assertEq(manager.getTopicAnnualPriceWad(topicId), 600e18, "default annual price should be 12 months");
+        assertEq(manager.quoteMinTokenForAnnual(topicId, address(usdc)), 600e6, "default annual quote mismatch");
     }
 
     function testSetAndExtendExpirySupportOpsCompensation() external {

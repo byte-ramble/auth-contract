@@ -79,8 +79,8 @@
 20. `CRITICAL`：存储布局文档（`storage-layout.md` v1.2）严重过期：OZ v5 迁移后 `_initialized`/`_initializing`/`_status` 改用 ERC-7201 命名空间存储不再占用顺序 slot，导致所有后续变量 slot 偏移；`_stableTokenEnabled/_stableTokenDecimals` 已重命名为 `_paymentTokenEnabled/_paymentTokenDecimals`；新增 `_topicDeactivated`（slot 23）；首发前已移除废弃的 legacy executor 槽位并把该空间回收进 `__gap`。
    修复：重新生成 storage layout 快照，更新为当前发布基线，增加 v1.2 差异摘要与 OZ 非升级版永久约束说明。
 
-21. `HIGH`：部署脚本 `shared.mjs` 中 `--private-key` 作为 CLI 参数传递，可被 `ps aux` 暴露；`console.log` 完整输出含私钥的命令行。
-   修复：改用 `FOUNDRY_PRIVATE_KEY` 环境变量传递私钥，从 CLI 参数和日志输出中移除。
+21. `HIGH`：部署脚本若把 deployer 私钥直接暴露给日志、环境或 CLI，会放大本机侧泄露面；同时广播必须显式绑定 sender 与签名钱包，避免 Foundry 回退到默认 sender。
+   修复：keystore 部署路径改为使用 Foundry 原生 `--keystore + --sender` 签名，不再先把 keystore 解成私钥；仅在显式直连私钥回退模式下才使用 `--private-key`，且日志输出对该参数做脱敏。
 
 22. `HIGH`：部署脚本使用 `--skip-simulation` 跳过 `eth_call` 模拟，revert 交易直接上链浪费 gas。
    修复：移除 `--skip-simulation` 标志。

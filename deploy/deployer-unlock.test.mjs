@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ethers } from 'ethers';
+import { buildForgeScriptArgs } from './shared.mjs';
+import {
+    primeDeployerPrivateKey as primeOmnixDeployerPrivateKey,
+    resetDeployerUnlockCache as resetOmnixDeployerUnlockCache,
+} from '../../osw-contract/scripts/omnix/shared/deployer-unlock.mjs';
 import {
     deployActionNeedsSigner,
     primeDeployerPrivateKey,
@@ -8,14 +13,56 @@ import {
     resetDeployerUnlockCache,
     unlockDeployerWalletOnce,
 } from './deployer-unlock.mjs';
-import {
-    primeDeployerPrivateKey as primeOmnixDeployerPrivateKey,
-    resetDeployerUnlockCache as resetOmnixDeployerUnlockCache,
-} from '../../opland/osw-contract/scripts/omnix/shared/deployer-unlock.mjs';
 
 test.afterEach(() => {
     resetDeployerUnlockCache();
     resetOmnixDeployerUnlockCache();
+});
+
+test('buildForgeScriptArgs binds sender and private key for broadcast signing', () => {
+    const args = buildForgeScriptArgs('script/Deploy.s.sol', {
+        privateKey: '0x' + '11'.repeat(32),
+        rpcUrl: 'https://bsc-dataseed.binance.org',
+        sender: '0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A',
+        extraArgs: ['--sig', 'run()'],
+    });
+
+    assert.deepEqual(args, [
+        'script',
+        'script/Deploy.s.sol',
+        '--rpc-url',
+        'https://bsc-dataseed.binance.org',
+        '--broadcast',
+        '--sender',
+        '0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A',
+        '--private-key',
+        '0x' + '11'.repeat(32),
+        '--sig',
+        'run()',
+    ]);
+});
+
+test('buildForgeScriptArgs prefers keystore signing without exposing private key', () => {
+    const args = buildForgeScriptArgs('script/Deploy.s.sol', {
+        keystorePath: '/Users/maning/.keystore/keystore-0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A.json',
+        rpcUrl: 'https://bsc-dataseed.binance.org',
+        sender: '0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A',
+        extraArgs: ['--sig', 'run()'],
+    });
+
+    assert.deepEqual(args, [
+        'script',
+        'script/Deploy.s.sol',
+        '--rpc-url',
+        'https://bsc-dataseed.binance.org',
+        '--broadcast',
+        '--sender',
+        '0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A',
+        '--keystore',
+        '/Users/maning/.keystore/keystore-0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A.json',
+        '--sig',
+        'run()',
+    ]);
 });
 
 test('deployActionNeedsSigner only unlocks for deploy actions', () => {

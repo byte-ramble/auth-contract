@@ -42,6 +42,7 @@
    - 关键环境变量：
      - `PROXY_ADDRESS`
      - `CONFIGURE_BSC_PAYMENT_TOKENS=true|false`（默认 `true`）
+     - `RAMBLE_DISCOUNT_BPS=9000`（默认 9 折）
      - `GLOBAL_TRIAL_ENDS_AT`
      - `TOPIC_TRIAL_KEYS=topic.a,topic.b`
      - `TOPIC_TRIAL_ENDS_ATS=1735689600,1738291200`
@@ -64,6 +65,7 @@
    - `getStableTokenConfig(token).enabled == true`
    - `getGlobalTrialEndsAt/getTopicTrialEndsAt/getEffectiveTrialEndsAt` 与业务策略一致
    - `getRamblePair` 与预期一致
+   - `getRambleDiscountBps == 9000`
    - `getTopicCount/getTopicAt/getTopicKey` 可读
    - 使用带 `minEffectiveValueWad + deadline` 的 `topup` 做小额冒烟（BNB / payment token / RAMBLE）
 

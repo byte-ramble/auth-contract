@@ -59,6 +59,7 @@ contract PostDeployConfigureScript {
         (address bnbUsdOracle,) = manager.getOracleConfig();
 
         bool configureBscPaymentTokens = _envOrBool("CONFIGURE_BSC_PAYMENT_TOKENS", true);
+        uint16 rambleDiscountBps = _parseUint16(vm.envOr("RAMBLE_DISCOUNT_BPS", string("9000")));
         string memory globalTrialRaw = vm.envOr("GLOBAL_TRIAL_ENDS_AT", string(""));
         bool hasGlobalTrial = bytes(globalTrialRaw).length != 0;
 
@@ -70,6 +71,10 @@ contract PostDeployConfigureScript {
             configuredTokens += _setPaymentTokenIfNeeded(manager, USDC, USDC_USD_ORACLE);
             configuredTokens += _setPaymentTokenIfNeeded(manager, WBNB, bnbUsdOracle);
             configuredTokens += _setPaymentTokenIfNeeded(manager, BTCB, BTC_USD_ORACLE);
+        }
+
+        if (manager.getRambleDiscountBps() != rambleDiscountBps) {
+            manager.setRambleDiscountBps(rambleDiscountBps);
         }
 
         if (hasGlobalTrial) {
@@ -169,6 +174,19 @@ contract PostDeployConfigureScript {
 
             value = (value * 10) + (charCode - 48);
         }
+    }
+
+    function _parseUint16(
+        string memory raw
+    ) internal pure returns (uint16 value) {
+        uint256 parsed = _parseUint(raw);
+        if (parsed > type(uint16).max) {
+            revert InvalidUintString(raw);
+        }
+
+        // casting to uint16 is safe because parsed was range-checked above.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        value = uint16(parsed);
     }
 
     function _normalizedStringHash(

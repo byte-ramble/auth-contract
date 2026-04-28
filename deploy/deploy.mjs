@@ -16,7 +16,6 @@
  */
 import {
     loadEnv,
-    primeFoundryPrivateKey,
     resolveBscNetwork,
     unlockWallet,
     runForgeScript,
@@ -35,6 +34,24 @@ import {
 // ---------------------------------------------------------------------------
 // Action handlers
 // ---------------------------------------------------------------------------
+
+function sameAddress(left, right) {
+    return Boolean(left && right && left.toLowerCase() === right.toLowerCase());
+}
+
+function shouldRunOwnerOnlyFollowups(signerAddress) {
+    const owner = readClean(process.env.OWNER);
+    return !owner || sameAddress(owner, signerAddress);
+}
+
+function assertSignerMatchesConfiguredOwner(action, signerAddress) {
+    const owner = readClean(process.env.OWNER);
+    if (owner && !sameAddress(owner, signerAddress)) {
+        throw new Error(
+            `${action} requires the owner signer ${owner}, but current deploy signer is ${signerAddress}. Run this step from the owner wallet or owner multisig flow.`,
+        );
+    }
+}
 
 function shouldConfigureBscPaymentTokens(network) {
     const explicit = readClean(process.env.CONFIGURE_BSC_PAYMENT_TOKENS);
@@ -58,6 +75,13 @@ function shouldConfigureBscPaymentTokens(network) {
     }
 
     return true;
+}
+
+function hasPostDeployConfigureInput(network) {
+    return shouldConfigureBscPaymentTokens(network)
+        || Boolean(readClean(process.env.RAMBLE_DISCOUNT_BPS))
+        || Boolean(readClean(process.env.GLOBAL_TRIAL_ENDS_AT))
+        || Boolean(readClean(process.env.TOPIC_TRIAL_KEYS));
 }
 
 function captureDeployStateConfig(state) {
@@ -94,7 +118,9 @@ async function actionDeploy(dryRun) {
     console.log(`[deploy] step 1/3 — Deploy implementation + proxy on ${network.label} (chainId=${network.chainId})`);
     runForgeScript('script/Deploy.s.sol', {
         privateKey: wallet.privateKey,
+        keystorePath: wallet.keystorePath,
         rpcUrl: network.rpcUrl,
+        sender: wallet.address,
         dryRun,
         extraArgs: [
             '--sig', 'run()',
@@ -124,7 +150,13 @@ async function actionDeploy(dryRun) {
     }
 
     // Step 2: Post-deploy configure (auto)
-    if (shouldConfigureBscPaymentTokens(network)) {
+    const canRunOwnerOnlyFollowups = shouldRunOwnerOnlyFollowups(wallet.address);
+
+    if (!canRunOwnerOnlyFollowups) {
+        console.log(
+            `[deploy] step 2/3 — PostDeployConfigure skipped (deployer ${wallet.address} is not owner ${readClean(process.env.OWNER)})`,
+        );
+    } else if (hasPostDeployConfigureInput(network)) {
         console.log('[deploy] step 2/3 — PostDeployConfigure');
         const proxyAddress = dryRun ? '0x0000000000000000000000000000000000000000' : readDeploymentState(network).proxy;
         if (!proxyAddress && !dryRun) {
@@ -133,7 +165,9 @@ async function actionDeploy(dryRun) {
             process.env.PROXY_ADDRESS = proxyAddress;
             runForgeScript('script/PostDeployConfigure.s.sol', {
                 privateKey: wallet.privateKey,
+                keystorePath: wallet.keystorePath,
                 rpcUrl: network.rpcUrl,
+                sender: wallet.address,
                 dryRun,
                 extraArgs: ['--sig', 'run()'],
             });
@@ -143,7 +177,11 @@ async function actionDeploy(dryRun) {
     }
 
     // Step 3: Optional executor setup
-    if (readClean(process.env.EXECUTOR)) {
+    if (!canRunOwnerOnlyFollowups) {
+        console.log(
+            `[deploy] step 3/3 — SetExecutor skipped (owner-only step; signer ${wallet.address} does not match owner ${readClean(process.env.OWNER)})`,
+        );
+    } else if (readClean(process.env.EXECUTOR)) {
         console.log('[deploy] step 3/3 — SetExecutor');
         const proxyAddress = dryRun ? '0x0000000000000000000000000000000000000000' : readDeploymentState(network).proxy;
         if (!proxyAddress && !dryRun) {
@@ -153,7 +191,9 @@ async function actionDeploy(dryRun) {
         process.env.PROXY_ADDRESS = proxyAddress;
         runForgeScript('script/SetExecutor.s.sol', {
             privateKey: wallet.privateKey,
+            keystorePath: wallet.keystorePath,
             rpcUrl: network.rpcUrl,
+            sender: wallet.address,
             dryRun,
             extraArgs: ['--sig', 'run()'],
         });
@@ -166,12 +206,15 @@ async function actionConfigure(dryRun) {
     requireEnv('PROXY_ADDRESS');
     const network = resolveBscNetwork();
     const wallet = await unlockWallet();
+    assertSignerMatchesConfiguredOwner('configure', wallet.address);
 
-    if (shouldConfigureBscPaymentTokens(network) || readClean(process.env.GLOBAL_TRIAL_ENDS_AT) || readClean(process.env.TOPIC_TRIAL_KEYS)) {
+    if (hasPostDeployConfigureInput(network)) {
         console.log(`[configure] PostDeployConfigure on ${network.label} (chainId=${network.chainId})`);
         runForgeScript('script/PostDeployConfigure.s.sol', {
             privateKey: wallet.privateKey,
+            keystorePath: wallet.keystorePath,
             rpcUrl: network.rpcUrl,
+            sender: wallet.address,
             dryRun,
             extraArgs: ['--sig', 'run()'],
         });
@@ -183,7 +226,9 @@ async function actionConfigure(dryRun) {
         console.log('[configure] SetExecutor');
         runForgeScript('script/SetExecutor.s.sol', {
             privateKey: wallet.privateKey,
+            keystorePath: wallet.keystorePath,
             rpcUrl: network.rpcUrl,
+            sender: wallet.address,
             dryRun,
             extraArgs: ['--sig', 'run()'],
         });
@@ -194,11 +239,31 @@ async function actionSetExecutor(dryRun) {
     requireEnv('PROXY_ADDRESS', 'EXECUTOR');
     const network = resolveBscNetwork();
     const wallet = await unlockWallet();
+    assertSignerMatchesConfiguredOwner('set-executor', wallet.address);
 
     console.log(`[set-executor] update executor on ${network.label} (chainId=${network.chainId})`);
     runForgeScript('script/SetExecutor.s.sol', {
         privateKey: wallet.privateKey,
+        keystorePath: wallet.keystorePath,
         rpcUrl: network.rpcUrl,
+        sender: wallet.address,
+        dryRun,
+        extraArgs: ['--sig', 'run()'],
+    });
+}
+
+async function actionSetupTopicExpiry(dryRun) {
+    requireEnv('PROXY_ADDRESS', 'TOPIC_KEY', 'TOPIC_PRICE_WAD', 'EXPIRY_USER', 'EXPIRY_TIMESTAMP');
+    const network = resolveBscNetwork();
+    const wallet = await unlockWallet();
+    assertSignerMatchesConfiguredOwner('setup-topic-expiry', wallet.address);
+
+    console.log(`[setup-topic-expiry] configure topic and expiry on ${network.label} (chainId=${network.chainId})`);
+    runForgeScript('script/SetupTopicExpiry.s.sol', {
+        privateKey: wallet.privateKey,
+        keystorePath: wallet.keystorePath,
+        rpcUrl: network.rpcUrl,
+        sender: wallet.address,
         dryRun,
         extraArgs: ['--sig', 'run()'],
     });
@@ -208,11 +273,14 @@ async function actionUpgrade(dryRun) {
     requireEnv('PROXY_ADDRESS');
     const network = resolveBscNetwork();
     const wallet = await unlockWallet();
+    assertSignerMatchesConfiguredOwner('upgrade', wallet.address);
 
     console.log(`[upgrade] deploy new implementation + upgradeToAndCall on ${network.label} (chainId=${network.chainId})`);
     runForgeScript('script/Upgrade.s.sol', {
         privateKey: wallet.privateKey,
+        keystorePath: wallet.keystorePath,
         rpcUrl: network.rpcUrl,
+        sender: wallet.address,
         dryRun,
         extraArgs: ['--sig', 'run()'],
     });
@@ -238,13 +306,16 @@ async function actionUpgradeAndMigrate(dryRun) {
     requireEnv('PROXY_ADDRESS');
     const network = resolveBscNetwork();
     const wallet = await unlockWallet();
+    assertSignerMatchesConfiguredOwner('upgrade-and-migrate', wallet.address);
 
     console.log(
         `[upgrade-and-migrate] deploy new implementation + upgrade + migrate legacy stables on ${network.label} (chainId=${network.chainId})`,
     );
     runForgeScript('script/UpgradeAndMigrate.s.sol', {
         privateKey: wallet.privateKey,
+        keystorePath: wallet.keystorePath,
         rpcUrl: network.rpcUrl,
+        sender: wallet.address,
         dryRun,
         extraArgs: ['--sig', 'run()'],
     });
@@ -328,6 +399,7 @@ Actions:
   deploy              Deploy implementation + proxy + auto-configure (default)
   configure           Run PostDeployConfigure on existing proxy
   set-executor        Set executor on existing proxy
+  setup-topic-expiry  Create/update one topic and set one user's expiry
   upgrade             Upgrade to new implementation
   upgrade-and-migrate Upgrade + migrate legacy stable tokens
   verify              Verify deployed contracts on BSCScan
@@ -346,10 +418,16 @@ Required .env vars:
   MAX_ORACLE_DELAY    Max oracle staleness in seconds (for deploy)
   PROXY_ADDRESS       Deployed proxy address (for configure/upgrade)
   EXECUTOR            Optional executor address (for deploy/configure/set-executor)
+  RAMBLE_DISCOUNT_BPS RAMBLE payment discount in bps; 9000 means user pays 90% of USD value
+  TOPIC_KEY           Topic key for setup-topic-expiry
+  TOPIC_PRICE_WAD     Topic monthly price in 1e18 wad units
+  EXPIRY_USER         User address for setup-topic-expiry
+  EXPIRY_TIMESTAMP    Absolute expiry timestamp for setup-topic-expiry
   BSCSCAN_API_KEY     BSCScan API key (for verify)
 
 Notes:
   On BSC testnet, CONFIGURE_BSC_PAYMENT_TOKENS defaults to false unless you set it explicitly.
+  If OWNER is a multisig or any address different from the deploy signer, deploy will stop after step 1 and skip owner-only follow-up configuration.
 `);
 }
 
@@ -363,6 +441,7 @@ async function main() {
         deploy: actionDeploy,
         configure: actionConfigure,
         'set-executor': actionSetExecutor,
+        'setup-topic-expiry': actionSetupTopicExpiry,
         upgrade: actionUpgrade,
         'upgrade-and-migrate': actionUpgradeAndMigrate,
         verify: actionVerify,
@@ -377,7 +456,6 @@ async function main() {
     }
 
     console.log(`[deploy] action=${args.action} dryRun=${args.dryRun}`);
-    await primeFoundryPrivateKey(args.action);
     await handler(args.dryRun);
     console.log('[deploy] done');
 }

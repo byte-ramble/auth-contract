@@ -21,6 +21,7 @@
 - 精度策略：适配任意常见 token decimals（统一归一化）
 - 推荐充值入口：使用带 `minEffectiveValueWad + deadline` 的保护版 `topup`
 - 支付币种：支持 `BNB / RAMBLE / owner 后置配置的 ERC20 payment token`
+- RAMBLE 折扣：默认 `9000 bps`，即 RAMBLE 充值按 9 折计入会员支付价值
 - RAMBLE 限制：仅在 `BSC chainId=56` 生效；非 BSC 链上 `quote/preview/topup/setRamblePair` 会显式回滚
 - `setPaymentToken(token, enabled, usdOracle)` 支持为单个支付代币绑定 USD 预言机；`setStableToken(token, enabled)` 保留为兼容性的 1:1 USD wrapper
 - ERC20 按“合约实际到账数量”计费，兼容 fee-on-transfer 场景的保守结算

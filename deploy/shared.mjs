@@ -1,19 +1,18 @@
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import fs from 'node:fs';
-import { execSync, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import {
-    primeDeployerPrivateKey,
     readCleanValue,
     readConfiguredDeployPrivateKey,
     readConfiguredKeystorePath,
-    unlockDeployerWalletOnce,
+    resolveDeployerIdentity,
 } from './deployer-unlock.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const MONOREPO_ROOT = path.resolve(PROJECT_ROOT, '../..');
+const MONOREPO_ROOT = path.resolve(PROJECT_ROOT, '../../..');
 
 const BSC_MAINNET_CHAIN_ID = 56;
 const BSC_TESTNET_CHAIN_ID = 97;
@@ -44,50 +43,28 @@ export async function loadEnv() {
 }
 
 // ---------------------------------------------------------------------------
-// Keystore unlock
+// Deployer identity
 // ---------------------------------------------------------------------------
 
 export function readClean(value) {
     return readCleanValue(value);
 }
 
-async function loadWalletFromKeystore(keystorePath) {
-    if (!fs.existsSync(keystorePath)) {
-        throw new Error(`Keystore not found: ${keystorePath}`);
-    }
-    const mod = await import('@omniarb/lp-manager/lib/wallet');
-    return mod.cmdOpen(keystorePath);
-}
-
 export async function unlockWallet() {
-    const wallet = await unlockDeployerWalletOnce({
-        env: process.env,
-        loadWalletFromKeystore,
-    });
+    const wallet = await resolveDeployerIdentity({ env: process.env });
     if (!wallet) {
         throw new Error(
             'No deployer wallet configured. Set AUTH_DEPLOY_KEYSTORE_PATH/AUTH_DEPLOY_PRIVATE_KEY, DEPLOY_KEYSTORE_PATH/DEPLOY_PRIVATE_KEY, or OMNIX_DEPLOY_KEYSTORE_PATH/OMNIX_DEPLOY_PRIVATE_KEY in .env',
         );
     }
 
-    if (readConfiguredKeystorePath(process.env)) {
-        console.log(`[deploy] unlocked ${wallet.address} from keystore`);
+    if (wallet.mode === 'keystore') {
+        console.log(`[deploy] using keystore signer ${wallet.address}`);
     } else if (readConfiguredDeployPrivateKey(process.env)) {
         console.log(`[deploy] using direct key for ${wallet.address}`);
     }
 
     return wallet;
-}
-
-export async function primeFoundryPrivateKey(action) {
-    return primeDeployerPrivateKey({
-        action,
-        env: process.env,
-        loadWalletFromKeystore,
-        setEnv: (key, value) => {
-            process.env[key] = value;
-        },
-    });
 }
 
 export function getRpcUrl() {
@@ -158,31 +135,50 @@ export function readDeployConfigFromEnv() {
  * Run a forge script with broadcast.
  * @param {string} scriptPath - relative path from project root, e.g. "script/Deploy.s.sol"
  * @param {object} opts
- * @param {string} opts.privateKey - deployer private key
+ * @param {string} [opts.privateKey] - deployer private key
+ * @param {string} [opts.keystorePath] - deployer keystore path
  * @param {string} opts.rpcUrl - rpc url
+ * @param {string} [opts.sender] - explicit sender address for forge broadcast
  * @param {string[]} [opts.extraArgs] - additional forge script args
  * @param {boolean} [opts.dryRun] - if true, print command without executing
  */
-export function runForgeScript(scriptPath, { privateKey, rpcUrl, extraArgs = [], dryRun = false }) {
-    const args = [
-        'forge', 'script', scriptPath,
+export function buildForgeScriptArgs(scriptPath, { privateKey, keystorePath, rpcUrl, sender, extraArgs = [] }) {
+    return [
+        'script', scriptPath,
         '--rpc-url', rpcUrl,
         '--broadcast',
+        ...(sender ? ['--sender', sender] : []),
+        ...(keystorePath ? ['--keystore', keystorePath] : []),
+        ...(privateKey ? ['--private-key', privateKey] : []),
         ...extraArgs,
     ];
+}
+
+function redactForgeArgsForLog(args) {
+    const redacted = [...args];
+    for (let i = 0; i < redacted.length; i += 1) {
+        if (redacted[i] === '--private-key' && i + 1 < redacted.length) {
+            redacted[i + 1] = '[REDACTED_PRIVATE_KEY]';
+            i += 1;
+        }
+    }
+    return redacted;
+}
+
+export function runForgeScript(scriptPath, { privateKey, keystorePath, rpcUrl, sender, extraArgs = [], dryRun = false }) {
+    const args = buildForgeScriptArgs(scriptPath, { privateKey, keystorePath, rpcUrl, sender, extraArgs });
 
     // Log command without sensitive data
-    const cmd = args.join(' ');
+    const cmd = ['forge', ...redactForgeArgsForLog(args)].join(' ');
     console.log(`\n[forge] ${dryRun ? '(dry-run) ' : ''}${cmd}\n`);
 
     if (dryRun) return;
 
     try {
-        execSync(cmd, {
+        execFileSync('forge', args, {
             cwd: PROJECT_ROOT,
             stdio: 'inherit',
-            // Pass private key via env var instead of CLI arg to avoid ps aux exposure
-            env: { ...process.env, FOUNDRY_PRIVATE_KEY: privateKey },
+            env: { ...process.env, ...(sender ? { ETH_FROM: sender } : {}) },
         });
     } catch (err) {
         throw new Error(`forge script failed: ${scriptPath}`);
@@ -280,7 +276,7 @@ export function verifyContract(contractAddress, contractPath, { constructorArgs 
     }
 
     const args = [
-        'forge', 'verify-contract',
+        'verify-contract',
         contractAddress,
         contractPath,
         '--chain', network.verifyChain,
@@ -292,11 +288,11 @@ export function verifyContract(contractAddress, contractPath, { constructorArgs 
         args.push('--constructor-args', ...constructorArgs);
     }
 
-    const cmd = args.join(' ');
+    const cmd = ['forge', ...args].join(' ');
     console.log(`\n[verify] ${cmd}\n`);
 
     try {
-        execSync(cmd, {
+        execFileSync('forge', args, {
             cwd: PROJECT_ROOT,
             stdio: 'inherit',
             timeout: 120_000,

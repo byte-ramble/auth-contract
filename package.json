@@ -18,6 +18,7 @@
     "deploy:dry": "node deploy/deploy.mjs --action deploy --dry-run",
     "deploy:configure": "node deploy/deploy.mjs --action configure",
     "deploy:set-executor": "node deploy/deploy.mjs --action set-executor",
+    "deploy:setup-topic": "node deploy/deploy.mjs --action setup-topic-expiry",
     "deploy:upgrade": "node deploy/deploy.mjs --action upgrade",
     "deploy:upgrade:migrate": "node deploy/deploy.mjs --action upgrade-and-migrate",
     "deploy:wallet": "node deploy/deploy.mjs --action wallet-address",
@@ -27,7 +28,7 @@
     "clean": "forge clean"
   },
   "dependencies": {
-    "@omniarb/lp-manager": "file:../lp-manager",
+    "@omniarb/lp-manager": "file:../../arb-lab/lp-manager",
     "@openzeppelin/contracts": "5.0.2"
   }
 }

@@ -41,13 +41,15 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     uint256 public constant WAD = 1e18;
     uint256 public constant BPS_BASE = 10_000;
     uint256 public constant ONE_MONTH = 30 days;
+    uint256 public constant ONE_YEAR = 365 days;
+    uint256 public constant MONTHS_PER_YEAR = 12;
     uint256 public constant MAX_BATCH_SIZE = 200;
     uint256 public constant BSC_CHAIN_ID = 56;
 
     address public constant BSC_WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     address public constant RAMBLE_TOKEN = 0x1A8C391f6c603894108fcE14A52E9Bf804c67777;
     address public constant DEFAULT_RAMBLE_WBNB_PAIR = 0x185e706a55d04815e7e10b506A5a4d8d1153aeAD;
-    uint16 public constant DEFAULT_RAMBLE_DISCOUNT_BPS = 9500;
+    uint16 public constant DEFAULT_RAMBLE_DISCOUNT_BPS = 9000;
 
     uint256 private constant V2_FEE_NUMERATOR = 9975;
     uint256 private constant V2_FEE_DENOMINATOR = 10_000;
@@ -89,7 +91,9 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
 
     mapping(bytes32 => bool) private _topicDeactivated;
 
-    uint256[30] private __gap;
+    mapping(bytes32 => uint256) private _annualPriceWadByTopic;
+
+    uint256[29] private __gap;
 
     error ZeroAddress();
     error EmptyTopicKey();
@@ -137,6 +141,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     event TopicCreated(bytes32 indexed topicId, uint256 monthlyPriceWad);
     event TopicKeyRegistered(bytes32 indexed topicId, string topicKey);
     event TopicPriceUpdated(bytes32 indexed topicId, uint256 newPriceWad);
+    event TopicAnnualPriceUpdated(bytes32 indexed topicId, uint256 newAnnualPriceWad);
     event WhitelistUpdated(bytes32 indexed topicId, address indexed user, bool isWhitelisted);
 
     event RambleDiscountUpdated(uint16 newBps);
@@ -235,6 +240,16 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         topic.monthlyPriceWad = newMonthlyPriceWad;
 
         emit TopicPriceUpdated(topicId, newMonthlyPriceWad);
+    }
+
+    function setTopicAnnualPrice(
+        bytes32 topicId,
+        uint256 newAnnualPriceWad
+    ) external onlyOwner {
+        _requireTopic(topicId);
+        _annualPriceWadByTopic[topicId] = newAnnualPriceWad;
+
+        emit TopicAnnualPriceUpdated(topicId, newAnnualPriceWad);
     }
 
     function deactivateTopic(
@@ -433,6 +448,17 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         return _topup(topicId, payToken, amountIn, beneficiary, minEffectiveValueWad, deadline);
     }
 
+    function topupAnnual(
+        bytes32 topicId,
+        address payToken,
+        uint256 amountIn,
+        address beneficiary,
+        uint256 minEffectiveValueWad,
+        uint256 deadline
+    ) external payable whenNotPaused nonReentrant returns (uint256 newExpiry) {
+        return _topupAnnual(topicId, payToken, amountIn, beneficiary, minEffectiveValueWad, deadline);
+    }
+
     function _topup(
         bytes32 topicId,
         address payToken,
@@ -440,6 +466,37 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         address beneficiary,
         uint256 minEffectiveValueWad,
         uint256 deadline
+    ) internal returns (uint256 newExpiry) {
+        Topic storage topic = _requireActiveTopic(topicId);
+        return _topupForBillingCycle(
+            topicId, payToken, amountIn, beneficiary, minEffectiveValueWad, deadline, ONE_MONTH, topic.monthlyPriceWad
+        );
+    }
+
+    function _topupAnnual(
+        bytes32 topicId,
+        address payToken,
+        uint256 amountIn,
+        address beneficiary,
+        uint256 minEffectiveValueWad,
+        uint256 deadline
+    ) internal returns (uint256 newExpiry) {
+        Topic storage topic = _requireActiveTopic(topicId);
+        uint256 annualPriceWad = _resolveAnnualPriceWad(topic.monthlyPriceWad, _annualPriceWadByTopic[topicId]);
+        return _topupForBillingCycle(
+            topicId, payToken, amountIn, beneficiary, minEffectiveValueWad, deadline, ONE_YEAR, annualPriceWad
+        );
+    }
+
+    function _topupForBillingCycle(
+        bytes32 topicId,
+        address payToken,
+        uint256 amountIn,
+        address beneficiary,
+        uint256 minEffectiveValueWad,
+        uint256 deadline,
+        uint256 billingCycleSeconds,
+        uint256 billingCyclePriceWad
     ) internal returns (uint256 newExpiry) {
         if (amountIn == 0) {
             revert AmountZero();
@@ -451,14 +508,13 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
             revert PaymentDeadlineExpired(deadline, block.timestamp);
         }
 
-        Topic storage topic = _requireActiveTopic(topicId);
         if (_whitelistByTopicUser[topicId][beneficiary]) {
             revert WhitelistedUserNoPaymentRequired(topicId, beneficiary);
         }
         if (_isTrialActive(topicId)) {
             revert TrialPeriodNoPaymentRequired(topicId, _getEffectiveTrialEndsAt(topicId));
         }
-        if (topic.monthlyPriceWad == 0) {
+        if (billingCyclePriceWad == 0) {
             revert FreeTopicNoPaymentRequired(topicId);
         }
         _requireTopicPaymentTokenAllowed(topicId, payToken);
@@ -494,13 +550,13 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
             revert EffectiveValueBelowMinimum(calc.effectiveValueWad, minEffectiveValueWad);
         }
 
-        if (calc.effectiveValueWad < topic.monthlyPriceWad) {
-            revert MinimumPaymentNotMet(calc.effectiveValueWad, topic.monthlyPriceWad);
+        if (calc.effectiveValueWad < billingCyclePriceWad) {
+            revert MinimumPaymentNotMet(calc.effectiveValueWad, billingCyclePriceWad);
         }
 
         calc.oldExpiry = _expiryByTopicUser[topicId][beneficiary];
         (calc.newExpiry,) = TopicAccessPolicyLib.computeNewExpiry(
-            calc.oldExpiry, block.timestamp, calc.effectiveValueWad, ONE_MONTH, topic.monthlyPriceWad
+            calc.oldExpiry, block.timestamp, calc.effectiveValueWad, billingCycleSeconds, billingCyclePriceWad
         );
         _expiryByTopicUser[topicId][beneficiary] = calc.newExpiry;
         newExpiry = calc.newExpiry;
@@ -575,7 +631,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
     ) public view returns (bool) {
         Topic storage topic = _topics[topicId];
         return TopicAccessPolicyLib.hasAccess(
-            topic.exists,
+            topic.exists && !_topicDeactivated[topicId],
             _whitelistByTopicUser[topicId][user],
             _getEffectiveTrialEndsAt(topicId),
             topic.monthlyPriceWad,
@@ -594,6 +650,13 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         bytes32 topicId
     ) external view returns (uint256) {
         return _requireTopic(topicId).monthlyPriceWad;
+    }
+
+    function getTopicAnnualPriceWad(
+        bytes32 topicId
+    ) external view returns (uint256) {
+        Topic storage topic = _requireTopic(topicId);
+        return _resolveAnnualPriceWad(topic.monthlyPriceWad, _annualPriceWadByTopic[topicId]);
     }
 
     function getRambleDiscountBps() external view returns (uint16) {
@@ -697,29 +760,14 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         bytes32 topicId
     ) external view returns (uint256 minBnbWei) {
         Topic storage topic = _requireActiveTopic(topicId);
-        if (_isNoPaymentRequired(topicId, topic.monthlyPriceWad)) {
-            return 0;
-        }
-        _requireTopicPaymentTokenAllowed(topicId, address(0));
-
-        (uint256 bnbUsdPrice, uint8 oracleDecimals) = _getBnbPriceChecked();
-        uint256 oracleScale = WadScaleLib.pow10(oracleDecimals);
-
-        minBnbWei = Math.mulDiv(topic.monthlyPriceWad, oracleScale, bnbUsdPrice, Math.Rounding.Ceil);
+        minBnbWei = _quoteMinTokenForValueWad(topicId, address(0), topic.monthlyPriceWad);
     }
 
     function quoteMinRambleForOneMonth(
         bytes32 topicId
     ) external view returns (uint256 minRambleAmount) {
         Topic storage topic = _requireActiveTopic(topicId);
-        uint256 monthlyPriceWad = topic.monthlyPriceWad;
-        if (_isNoPaymentRequired(topicId, monthlyPriceWad)) {
-            return 0;
-        }
-        _requireTopicPaymentTokenAllowed(topicId, RAMBLE_TOKEN);
-        _requireRamblePaymentSupported();
-
-        minRambleAmount = _quoteMinRambleForValueWad(monthlyPriceWad);
+        minRambleAmount = _quoteMinTokenForValueWad(topicId, RAMBLE_TOKEN, topic.monthlyPriceWad);
     }
 
     function _quoteMinRambleForValueWad(
@@ -739,25 +787,35 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         address payToken
     ) external view returns (uint256 minTokenAmount) {
         Topic storage topic = _requireActiveTopic(topicId);
-        uint256 monthlyPriceWad = topic.monthlyPriceWad;
-        if (_isNoPaymentRequired(topicId, monthlyPriceWad)) {
-            return 0;
-        }
-        _requireTopicPaymentTokenAllowed(topicId, payToken);
+        minTokenAmount = _quoteMinTokenForValueWad(topicId, payToken, topic.monthlyPriceWad);
+    }
 
-        if (payToken == address(0)) {
-            (uint256 bnbUsdPrice, uint8 oracleDecimals) = _getBnbPriceChecked();
-            return Math.mulDiv(monthlyPriceWad, WadScaleLib.pow10(oracleDecimals), bnbUsdPrice, Math.Rounding.Ceil);
-        }
-        if (payToken == RAMBLE_TOKEN) {
-            _requireRamblePaymentSupported();
-            return _quoteMinRambleForValueWad(monthlyPriceWad);
-        }
-        if (!_paymentTokenEnabled[payToken]) {
-            revert UnsupportedPayToken(payToken);
-        }
+    function quoteMinBnbForAnnual(
+        bytes32 topicId
+    ) external view returns (uint256 minBnbWei) {
+        Topic storage topic = _requireActiveTopic(topicId);
+        minBnbWei = _quoteMinTokenForValueWad(
+            topicId, address(0), _resolveAnnualPriceWad(topic.monthlyPriceWad, _annualPriceWadByTopic[topicId])
+        );
+    }
 
-        minTokenAmount = _quoteMinConfiguredTokenAmount(payToken, monthlyPriceWad);
+    function quoteMinRambleForAnnual(
+        bytes32 topicId
+    ) external view returns (uint256 minRambleAmount) {
+        Topic storage topic = _requireActiveTopic(topicId);
+        minRambleAmount = _quoteMinTokenForValueWad(
+            topicId, RAMBLE_TOKEN, _resolveAnnualPriceWad(topic.monthlyPriceWad, _annualPriceWadByTopic[topicId])
+        );
+    }
+
+    function quoteMinTokenForAnnual(
+        bytes32 topicId,
+        address payToken
+    ) external view returns (uint256 minTokenAmount) {
+        Topic storage topic = _requireActiveTopic(topicId);
+        minTokenAmount = _quoteMinTokenForValueWad(
+            topicId, payToken, _resolveAnnualPriceWad(topic.monthlyPriceWad, _annualPriceWadByTopic[topicId])
+        );
     }
 
     function previewTopup(
@@ -766,15 +824,64 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         uint256 amountIn
     ) external view returns (uint256 rawValueWad, uint256 effectiveValueWad, uint256 secondsAdded) {
         Topic storage topic = _requireActiveTopic(topicId);
+        return _previewTopupForBillingCycle(topicId, payToken, amountIn, ONE_MONTH, topic.monthlyPriceWad);
+    }
 
-        if (_isNoPaymentRequired(topicId, topic.monthlyPriceWad) || amountIn == 0) {
+    function previewAnnualTopup(
+        bytes32 topicId,
+        address payToken,
+        uint256 amountIn
+    ) external view returns (uint256 rawValueWad, uint256 effectiveValueWad, uint256 secondsAdded) {
+        Topic storage topic = _requireActiveTopic(topicId);
+        return _previewTopupForBillingCycle(
+            topicId,
+            payToken,
+            amountIn,
+            ONE_YEAR,
+            _resolveAnnualPriceWad(topic.monthlyPriceWad, _annualPriceWadByTopic[topicId])
+        );
+    }
+
+    function _previewTopupForBillingCycle(
+        bytes32 topicId,
+        address payToken,
+        uint256 amountIn,
+        uint256 billingCycleSeconds,
+        uint256 billingCyclePriceWad
+    ) internal view returns (uint256 rawValueWad, uint256 effectiveValueWad, uint256 secondsAdded) {
+        if (_isNoPaymentRequired(topicId, billingCyclePriceWad) || amountIn == 0) {
             return (0, 0, 0);
         }
         _requireTopicPaymentTokenAllowed(topicId, payToken);
 
         (rawValueWad, effectiveValueWad) = _previewPaymentValueWad(payToken, amountIn);
         (, secondsAdded) =
-            TopicAccessPolicyLib.computeNewExpiry(0, 0, effectiveValueWad, ONE_MONTH, topic.monthlyPriceWad);
+            TopicAccessPolicyLib.computeNewExpiry(0, 0, effectiveValueWad, billingCycleSeconds, billingCyclePriceWad);
+    }
+
+    function _quoteMinTokenForValueWad(
+        bytes32 topicId,
+        address payToken,
+        uint256 targetValueWad
+    ) internal view returns (uint256 minTokenAmount) {
+        if (_isNoPaymentRequired(topicId, targetValueWad)) {
+            return 0;
+        }
+        _requireTopicPaymentTokenAllowed(topicId, payToken);
+
+        if (payToken == address(0)) {
+            (uint256 bnbUsdPrice, uint8 oracleDecimals) = _getBnbPriceChecked();
+            return Math.mulDiv(targetValueWad, WadScaleLib.pow10(oracleDecimals), bnbUsdPrice, Math.Rounding.Ceil);
+        }
+        if (payToken == RAMBLE_TOKEN) {
+            _requireRamblePaymentSupported();
+            return _quoteMinRambleForValueWad(targetValueWad);
+        }
+        if (!_paymentTokenEnabled[payToken]) {
+            revert UnsupportedPayToken(payToken);
+        }
+
+        minTokenAmount = _quoteMinConfiguredTokenAmount(payToken, targetValueWad);
     }
 
     function _setRambleDiscountBps(
@@ -964,6 +1071,16 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         emit TopicKeyRegistered(topicId, topicKey);
     }
 
+    function _resolveAnnualPriceWad(
+        uint256 monthlyPriceWad,
+        uint256 configuredAnnualPriceWad
+    ) internal pure returns (uint256) {
+        if (monthlyPriceWad == 0) {
+            return 0;
+        }
+        return configuredAnnualPriceWad == 0 ? monthlyPriceWad * MONTHS_PER_YEAR : configuredAnnualPriceWad;
+    }
+
     function _previewPaymentValueWad(
         address payToken,
         uint256 amountIn
@@ -1049,7 +1166,7 @@ contract TopicAccessManagerUpgradeable is Initializable, UUPSUpgradeable, Ownabl
         // RAMBLE amount is converted to expected WBNB out (AMM curve), then priced by BNB/USD oracle.
         uint256 wbnbOut = _estimateWbnbOutFromRamble(rambleAmount);
         rawValueWad = _quoteBnbValueWad(wbnbOut);
-        // Discount bps means user pays only part of USD value: e.g. 9500 -> 95%.
+        // Discount bps means user pays only part of USD value: e.g. 9000 -> 90%.
         effectiveValueWad = Math.mulDiv(rawValueWad, BPS_BASE, _rambleDiscountBps);
     }
 

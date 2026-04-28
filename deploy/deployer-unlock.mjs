@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -44,8 +45,29 @@ async function getWalletModule() {
     if (cachedWalletModule) return cachedWalletModule;
 
     const mod = await import(pathToFileURL(path.join(MONOREPO_ROOT, 'node_modules/ethers/lib/ethers.js')).href);
-    cachedWalletModule = { Wallet: mod.Wallet };
+    cachedWalletModule = { Wallet: mod.Wallet, getAddress: mod.utils.getAddress };
     return cachedWalletModule;
+}
+
+function extractAddressFromKeystoreJson(keystorePath, getAddress) {
+    if (!fs.existsSync(keystorePath)) {
+        throw new Error(`Keystore not found: ${keystorePath}`);
+    }
+
+    const parsed = JSON.parse(fs.readFileSync(keystorePath, 'utf8'));
+    const rawAddress = readCleanValue(parsed?.address) || readCleanValue(parsed?.Address);
+    if (rawAddress) {
+        return getAddress(rawAddress.startsWith('0x') ? rawAddress : `0x${rawAddress}`);
+    }
+
+    const basename = path.basename(keystorePath);
+    const match = basename.match(/0x[a-fA-F0-9]{40}|[a-fA-F0-9]{40}/);
+    if (match) {
+        const candidate = match[0].startsWith('0x') ? match[0] : `0x${match[0]}`;
+        return getAddress(candidate);
+    }
+
+    throw new Error(`Could not determine wallet address from keystore: ${keystorePath}`);
 }
 
 function normalizeAction(action) {
@@ -72,6 +94,30 @@ export function readConfiguredKeystorePath(env = process.env) {
         || readCleanValue(env.DEPLOY_KEYSTORE_PATH)
         || readCleanValue(env.OMNIX_DEPLOY_KEYSTORE_PATH)
     );
+}
+
+export async function resolveDeployerIdentity({ env = process.env } = {}) {
+    const { Wallet, getAddress } = await getWalletModule();
+    const keystorePath = readConfiguredKeystorePath(env);
+    if (keystorePath) {
+        return {
+            mode: 'keystore',
+            keystorePath,
+            address: extractAddressFromKeystoreJson(keystorePath, getAddress),
+        };
+    }
+
+    const directPrivateKey = readConfiguredDeployPrivateKey(env);
+    if (directPrivateKey) {
+        const wallet = new Wallet(directPrivateKey);
+        return {
+            mode: 'private-key',
+            privateKey: wallet.privateKey,
+            address: wallet.address,
+        };
+    }
+
+    return null;
 }
 
 function normalizeWallet(wallet, Wallet) {
