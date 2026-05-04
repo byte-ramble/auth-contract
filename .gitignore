@@ -9,4 +9,4 @@ deployments/
 # Environment
 .env
 .env.*
-
+!.env.example
