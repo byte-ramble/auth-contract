@@ -8,6 +8,10 @@ interface VmScript {
         string calldata key
     ) external view returns (address);
 
+    function envUint(
+        string calldata key
+    ) external view returns (uint256);
+
     function envString(
         string calldata key,
         string calldata delimiter
@@ -37,7 +41,7 @@ contract PostDeployConfigureScript {
     address private constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
     address private constant BTCB = 0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c;
 
-    address private constant ETH_USD_ORACLE = 0x9Ef1b8c0ED50Be8Bfa6025dA7D6f9A3c8cd9C89B;
+    address private constant ETH_USD_ORACLE = 0x9ef1B8c0E4F7dc8bF5719Ea496883DC6401d5b2e;
     address private constant BTC_USD_ORACLE = 0x264990fbd0A4796A3E3d8E37C4d5F87a3aCa5Ebf;
     address private constant USDT_USD_ORACLE = 0xB97Ad0E74fa7d920791E90258A6E2085088b4320;
     address private constant USDC_USD_ORACLE = 0x51597f405303C4377E36123cBc172b13269EA163;
@@ -59,7 +63,8 @@ contract PostDeployConfigureScript {
         (address bnbUsdOracle,) = manager.getOracleConfig();
 
         bool configureBscPaymentTokens = _envOrBool("CONFIGURE_BSC_PAYMENT_TOKENS", true);
-        uint16 rambleDiscountBps = _parseUint16(vm.envOr("RAMBLE_DISCOUNT_BPS", string("9000")));
+        string memory rambleDiscountRaw = vm.envOr("RAMBLE_DISCOUNT_BPS", string(""));
+        bool hasRambleDiscount = bytes(rambleDiscountRaw).length != 0;
         string memory globalTrialRaw = vm.envOr("GLOBAL_TRIAL_ENDS_AT", string(""));
         bool hasGlobalTrial = bytes(globalTrialRaw).length != 0;
 
@@ -73,8 +78,11 @@ contract PostDeployConfigureScript {
             configuredTokens += _setPaymentTokenIfNeeded(manager, BTCB, BTC_USD_ORACLE);
         }
 
-        if (manager.getRambleDiscountBps() != rambleDiscountBps) {
-            manager.setRambleDiscountBps(rambleDiscountBps);
+        if (hasRambleDiscount) {
+            uint16 rambleDiscountBps = _parseUint16(rambleDiscountRaw);
+            if (manager.getRambleDiscountBps() != rambleDiscountBps) {
+                manager.setRambleDiscountBps(rambleDiscountBps);
+            }
         }
 
         if (hasGlobalTrial) {
@@ -84,9 +92,42 @@ contract PostDeployConfigureScript {
             }
         }
 
+        _configureTopic(manager);
         configuredTopicTrials = _configureTopicTrials(manager);
 
         vm.stopBroadcast();
+    }
+
+    function _configureTopic(
+        TopicAccessManagerUpgradeable manager
+    ) internal {
+        string memory topicKey = vm.envOr("TOPIC_KEY", string(""));
+        if (bytes(topicKey).length == 0) {
+            return;
+        }
+
+        bytes32 topicId = keccak256(bytes(topicKey));
+        uint256 monthlyPriceWad = vm.envUint("TOPIC_PRICE_WAD");
+
+        if (!manager.topicExists(topicId)) {
+            manager.createTopicByKey(topicKey, monthlyPriceWad);
+        } else {
+            if (manager.getTopicPriceWad(topicId) != monthlyPriceWad) {
+                manager.setTopicPrice(topicId, monthlyPriceWad);
+            }
+
+            if (keccak256(bytes(manager.getTopicKey(topicId))) != keccak256(bytes(topicKey))) {
+                manager.setTopicKey(topicId, topicKey);
+            }
+        }
+
+        string memory annualPriceRaw = vm.envOr("TOPIC_ANNUAL_PRICE_WAD", string(""));
+        if (bytes(annualPriceRaw).length != 0) {
+            uint256 annualPriceWad = _parseUint(annualPriceRaw);
+            if (manager.getTopicAnnualPriceWad(topicId) != annualPriceWad) {
+                manager.setTopicAnnualPrice(topicId, annualPriceWad);
+            }
+        }
     }
 
     function _configureTopicTrials(

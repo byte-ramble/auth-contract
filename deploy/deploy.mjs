@@ -5,6 +5,7 @@
  * 用法：
  *   node deploy/deploy.mjs --action deploy [--dry-run]
  *   node deploy/deploy.mjs --action configure [--dry-run]
+ *   node deploy/deploy.mjs --action deploy-implementation [--dry-run]
  *   node deploy/deploy.mjs --action upgrade [--dry-run]
  *   node deploy/deploy.mjs --action upgrade-and-migrate [--dry-run]
  *
@@ -29,6 +30,7 @@ import {
     readDeployConfigFromEnv,
     encodeProxyConstructorArgs,
     verifyContract,
+    primeSingleUnlockForAction,
 } from './shared.mjs';
 
 // ---------------------------------------------------------------------------
@@ -80,6 +82,9 @@ function shouldConfigureBscPaymentTokens(network) {
 function hasPostDeployConfigureInput(network) {
     return shouldConfigureBscPaymentTokens(network)
         || Boolean(readClean(process.env.RAMBLE_DISCOUNT_BPS))
+        || Boolean(readClean(process.env.TOPIC_KEY))
+        || Boolean(readClean(process.env.TOPIC_PRICE_WAD))
+        || Boolean(readClean(process.env.TOPIC_ANNUAL_PRICE_WAD))
         || Boolean(readClean(process.env.GLOBAL_TRIAL_ENDS_AT))
         || Boolean(readClean(process.env.TOPIC_TRIAL_KEYS));
 }
@@ -269,6 +274,43 @@ async function actionSetupTopicExpiry(dryRun) {
     });
 }
 
+async function actionDeployImplementation(dryRun) {
+    const network = resolveBscNetwork();
+    const wallet = await unlockWallet();
+    if (!dryRun) {
+        checkDeployerBalance(wallet.address, { rpcUrl: network.rpcUrl, minBnb: readMinDeployerBnb() });
+    }
+
+    console.log(`[deploy-implementation] deploy new implementation on ${network.label} (chainId=${network.chainId})`);
+    runForgeScript('script/DeployImplementation.s.sol', {
+        privateKey: wallet.privateKey,
+        keystorePath: wallet.keystorePath,
+        rpcUrl: network.rpcUrl,
+        sender: wallet.address,
+        dryRun,
+        extraArgs: ['--sig', 'run()'],
+    });
+
+    if (!dryRun) {
+        const broadcast = extractBroadcastAddresses('DeployImplementation.s.sol', network);
+        if (broadcast && broadcast.transactions) {
+            const state = readDeploymentState(network);
+            const creations = broadcast.transactions.filter(tx => tx.transactionType === 'CREATE');
+            if (creations.length >= 1) {
+                state.pendingImplementation = creations[creations.length - 1].contractAddress;
+                state.pendingImplementationDeployedAt = new Date().toISOString();
+                state.chainId = network.chainId;
+                state.network = network.label;
+                writeDeploymentState(state, network);
+                console.log(`[deploy-implementation] pending impl: ${state.pendingImplementation}`);
+                console.log(
+                    '[deploy-implementation] rerun prepare with NEW_IMPLEMENTATION set to include the owner upgrade tx',
+                );
+            }
+        }
+    }
+}
+
 async function actionUpgrade(dryRun) {
     requireEnv('PROXY_ADDRESS');
     const network = resolveBscNetwork();
@@ -398,6 +440,8 @@ Usage:
 Actions:
   deploy              Deploy implementation + proxy + auto-configure (default)
   configure           Run PostDeployConfigure on existing proxy
+  deploy-implementation
+                      Deploy implementation only; use for multisig upgrade preparation
   set-executor        Set executor on existing proxy
   setup-topic-expiry  Create/update one topic and set one user's expiry
   upgrade             Upgrade to new implementation
@@ -436,10 +480,12 @@ async function main() {
     if (args.help) { printHelp(); return; }
 
     await loadEnv();
+    await primeSingleUnlockForAction(args.action);
 
     const handlers = {
         deploy: actionDeploy,
         configure: actionConfigure,
+        'deploy-implementation': actionDeployImplementation,
         'set-executor': actionSetExecutor,
         'setup-topic-expiry': actionSetupTopicExpiry,
         upgrade: actionUpgrade,

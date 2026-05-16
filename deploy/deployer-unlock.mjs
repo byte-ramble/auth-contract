@@ -1,17 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import crypto from 'node:crypto';
+import readlineSync from 'readline-sync';
+import { Wallet, utils } from 'ethers';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, '..');
-const MONOREPO_ROOT = path.resolve(PROJECT_ROOT, '../..');
-
-const SIGNER_ACTIONS = new Set(['deploy', 'configure', 'upgrade', 'upgrade-and-migrate', 'set-executor']);
+const SIGNER_ACTIONS = new Set([
+    'deploy',
+    'configure',
+    'deploy-implementation',
+    'upgrade',
+    'upgrade-and-migrate',
+    'set-executor',
+    'setup-topic-expiry',
+]);
 
 let cachedUnlockedWallet = null;
 let cachedKeystorePath = null;
-let cachedWalletModule = null;
 
 export function readCleanValue(value) {
     if (value === undefined || value === null) return undefined;
@@ -41,20 +45,12 @@ export function readCleanValue(value) {
     return text || undefined;
 }
 
-async function getWalletModule() {
-    if (cachedWalletModule) return cachedWalletModule;
-
-    const mod = await import(pathToFileURL(path.join(MONOREPO_ROOT, 'node_modules/ethers/lib/ethers.js')).href);
-    cachedWalletModule = { Wallet: mod.Wallet, getAddress: mod.utils.getAddress };
-    return cachedWalletModule;
-}
-
 function extractAddressFromKeystoreJson(keystorePath, getAddress) {
     if (!fs.existsSync(keystorePath)) {
         throw new Error(`Keystore not found: ${keystorePath}`);
     }
 
-    const parsed = JSON.parse(fs.readFileSync(keystorePath, 'utf8'));
+    const parsed = readKeystoreJsonObject(keystorePath).keystore;
     const rawAddress = readCleanValue(parsed?.address) || readCleanValue(parsed?.Address);
     if (rawAddress) {
         return getAddress(rawAddress.startsWith('0x') ? rawAddress : `0x${rawAddress}`);
@@ -68,6 +64,47 @@ function extractAddressFromKeystoreJson(keystorePath, getAddress) {
     }
 
     throw new Error(`Could not determine wallet address from keystore: ${keystorePath}`);
+}
+
+export function readKeystoreJsonObject(keystorePath) {
+    if (!fs.existsSync(keystorePath)) {
+        throw new Error(`Keystore not found: ${keystorePath}`);
+    }
+
+    const raw = fs.readFileSync(keystorePath, 'utf8');
+    let parsed = JSON.parse(raw);
+    const wasJsonString = typeof parsed === 'string';
+    if (wasJsonString) {
+        parsed = JSON.parse(parsed);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`Invalid keystore JSON object: ${keystorePath}`);
+    }
+    return { keystore: parsed, wasJsonString };
+}
+
+export function normalizeKeystorePathForForge(keystorePath, { cacheDir } = {}) {
+    if (!keystorePath) return { keystorePath, normalized: false };
+
+    const result = readKeystoreJsonObject(keystorePath);
+    if (!result.wasJsonString) {
+        return { keystorePath, normalized: false };
+    }
+
+    const outputDir = cacheDir || path.join(path.dirname(keystorePath), '.normalized-keystores');
+    fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+
+    const hash = crypto
+        .createHash('sha256')
+        .update(path.resolve(keystorePath))
+        .digest('hex')
+        .slice(0, 12);
+    const basename = path.basename(keystorePath).replace(/[^A-Za-z0-9_.-]/g, '_');
+    const outputPath = path.join(outputDir, `${hash}-${basename}`);
+    fs.writeFileSync(outputPath, `${JSON.stringify(result.keystore, null, 2)}\n`, { mode: 0o600 });
+    fs.chmodSync(outputPath, 0o600);
+
+    return { keystorePath: outputPath, normalized: true, originalKeystorePath: keystorePath };
 }
 
 function normalizeAction(action) {
@@ -88,6 +125,12 @@ export function readConfiguredDeployPrivateKey(env = process.env) {
     );
 }
 
+export function readSingleUnlockEnabled(env = process.env) {
+    const raw = readCleanValue(env.AUTH_SINGLE_UNLOCK || env.DEPLOY_SINGLE_UNLOCK);
+    if (!raw) return false;
+    return /^(1|true|yes|on)$/i.test(raw);
+}
+
 export function readConfiguredKeystorePath(env = process.env) {
     return (
         readCleanValue(env.AUTH_DEPLOY_KEYSTORE_PATH)
@@ -97,7 +140,7 @@ export function readConfiguredKeystorePath(env = process.env) {
 }
 
 export async function resolveDeployerIdentity({ env = process.env } = {}) {
-    const { Wallet, getAddress } = await getWalletModule();
+    const getAddress = utils.getAddress;
     const keystorePath = readConfiguredKeystorePath(env);
     if (keystorePath) {
         return {
@@ -134,7 +177,6 @@ function normalizeWallet(wallet, Wallet) {
 }
 
 export async function unlockDeployerWalletOnce({ env = process.env, loadWalletFromKeystore }) {
-    const { Wallet } = await getWalletModule();
     const keystorePath = readConfiguredKeystorePath(env);
     if (keystorePath) {
         if (typeof loadWalletFromKeystore !== 'function') {
@@ -157,6 +199,46 @@ export async function unlockDeployerWalletOnce({ env = process.env, loadWalletFr
     }
 
     return null;
+}
+
+export async function loadWalletFromKeystore(keystorePath, { readPassword } = {}) {
+    if (!keystorePath) {
+        throw new Error('Missing keystore path');
+    }
+
+    const { keystore } = readKeystoreJsonObject(keystorePath);
+    const passwordReader = readPassword || (() => readlineSync.question('keystore password: ', {
+        hideEchoBack: true,
+    }));
+    const password = passwordReader();
+
+    try {
+        return await Wallet.fromEncryptedJson(JSON.stringify(keystore), password);
+    } catch (error) {
+        throw new Error(`Unable to decrypt keystore ${keystorePath}: ${error.message}`);
+    }
+}
+
+export async function maybePrimeSingleUnlock({
+    action,
+    env = process.env,
+    setEnv = (key, value) => {
+        env[key] = value;
+    },
+    log = console.log,
+    readPassword,
+} = {}) {
+    if (!readSingleUnlockEnabled(env)) {
+        return { primed: false, reason: 'single-unlock-disabled' };
+    }
+
+    return primeDeployerPrivateKey({
+        action,
+        env,
+        setEnv,
+        loadWalletFromKeystore: (keystorePath) => loadWalletFromKeystore(keystorePath, { readPassword }),
+        log,
+    });
 }
 
 export async function primeDeployerPrivateKey({

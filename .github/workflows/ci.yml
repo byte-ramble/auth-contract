@@ -21,11 +21,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Setup Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Format Check
         run: forge fmt --check
@@ -33,8 +37,11 @@ jobs:
       - name: Build
         run: forge build
 
+      - name: Deploy Script Tests
+        run: npm run test:deploy-scripts
+
       - name: Test
         run: forge test --offline -vv
 
       - name: Coverage
-        run: forge coverage --offline --report summary
+        run: forge coverage --offline --ir-minimum --report summary

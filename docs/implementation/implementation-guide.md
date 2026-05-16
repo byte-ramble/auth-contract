@@ -182,9 +182,9 @@ packages/auth-contract/
 - `BSC_RPC_URL=<RPC> forge test --match-path test/fork/*.t.sol -vv`
 - `forge script script/PostDeployConfigure.s.sol --rpc-url <RPC> --broadcast`
 - `forge coverage --offline --report summary`
-- `npm run -w @omniarb/auth-contract check:security`
-- `npm run -w @omniarb/auth-contract ci`
-- `npm run -w @omniarb/auth-contract test:lifecycle`
+- `npm run check:security`
+- `npm run ci`
+- `npm run test:lifecycle`
 - `forge script script/UpgradeAndMigrate.s.sol --rpc-url <RPC> --broadcast`
 - `forge fmt`
 - `forge clean`

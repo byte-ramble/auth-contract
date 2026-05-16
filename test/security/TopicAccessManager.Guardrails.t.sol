@@ -413,7 +413,9 @@ contract TopicAccessManagerGuardrailsTest is TopicAccessFixture {
         }
 
         vm.expectRevert(
-            abi.encodeWithSelector(TopicAccessManagerUpgradeable.BatchSizeExceeded.selector, uint256(201), manager.MAX_BATCH_SIZE())
+            abi.encodeWithSelector(
+                TopicAccessManagerUpgradeable.BatchSizeExceeded.selector, uint256(201), manager.MAX_BATCH_SIZE()
+            )
         );
         vm.prank(owner);
         manager.batchSetWhitelist(topicId, users, true);
@@ -426,9 +428,7 @@ contract TopicAccessManagerGuardrailsTest is TopicAccessFixture {
         vm.startPrank(owner);
         manager.deactivateTopic(topicId);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId)
-        );
+        vm.expectRevert(abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId));
         manager.deactivateTopic(topicId);
         vm.stopPrank();
     }
@@ -437,9 +437,7 @@ contract TopicAccessManagerGuardrailsTest is TopicAccessFixture {
         bytes32 topicId = _hashTopic("guard.reactivate.active");
         _createTopic(topicId, 1e18);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicAlreadyActive.selector, topicId)
-        );
+        vm.expectRevert(abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicAlreadyActive.selector, topicId));
         vm.prank(owner);
         manager.reactivateTopic(topicId);
     }
@@ -452,9 +450,7 @@ contract TopicAccessManagerGuardrailsTest is TopicAccessFixture {
         vm.prank(owner);
         manager.deactivateTopic(topicId);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId)
-        );
+        vm.expectRevert(abi.encodeWithSelector(TopicAccessManagerUpgradeable.TopicIsDeactivated.selector, topicId));
         vm.prank(user);
         manager.topup(topicId, address(usdc), 100e6, user);
     }

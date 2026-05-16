@@ -2,6 +2,10 @@
 /cache/
 /broadcast/
 /artifacts/
+/node_modules/
+/lib/openzeppelin-contracts
+/.claude/
+/.playwright-cli/
 
 # Deployment state (contains addresses, no secrets)
 deployments/

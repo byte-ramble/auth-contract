@@ -1,5 +1,5 @@
 {
-  "name": "@omniarb/auth-contract",
+  "name": "@opland-lab/auth-contract",
   "version": "1.0.0",
   "private": true,
   "scripts": {
@@ -13,10 +13,14 @@
     "test:fork": "forge test --match-path \"test/fork/*.t.sol\" -vv",
     "test:deploy-scripts": "node --test deploy/*.test.mjs",
     "check:security": "npm run test:security && npm run test:upgrade && npm run test:lifecycle && npm run test:fuzz",
-    "ci": "npm run fmt:check && npm run build && npm run test && forge coverage --offline --report summary",
+    "ci": "npm run fmt:check && npm run build && npm run test:deploy-scripts && npm run test && forge coverage --offline --ir-minimum --report summary",
     "deploy": "node deploy/deploy.mjs --action deploy",
     "deploy:dry": "node deploy/deploy.mjs --action deploy --dry-run",
     "deploy:configure": "node deploy/deploy.mjs --action configure",
+    "deploy:implementation": "node deploy/deploy.mjs --action deploy-implementation",
+    "prepare:membership-payments": "node deploy/prepare-membership-payment-txs.mjs",
+    "enable:membership-payments": "node deploy/enable-membership-payments.mjs",
+    "withdraw:test": "node deploy/test-withdrawals.mjs",
     "deploy:set-executor": "node deploy/deploy.mjs --action set-executor",
     "deploy:setup-topic": "node deploy/deploy.mjs --action setup-topic-expiry",
     "deploy:upgrade": "node deploy/deploy.mjs --action upgrade",
@@ -28,7 +32,9 @@
     "clean": "forge clean"
   },
   "dependencies": {
-    "@omniarb/lp-manager": "file:../../arb-lab/lp-manager",
-    "@openzeppelin/contracts": "5.0.2"
+    "@openzeppelin/contracts": "5.0.2",
+    "dotenv": "^16.4.7",
+    "ethers": "^5.7.2",
+    "readline-sync": "^1.4.10"
   }
 }

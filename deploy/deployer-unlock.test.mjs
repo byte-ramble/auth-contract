@@ -3,20 +3,23 @@ import assert from 'node:assert/strict';
 import { ethers } from 'ethers';
 import { buildForgeScriptArgs } from './shared.mjs';
 import {
-    primeDeployerPrivateKey as primeOmnixDeployerPrivateKey,
-    resetDeployerUnlockCache as resetOmnixDeployerUnlockCache,
-} from '../../osw-contract/scripts/omnix/shared/deployer-unlock.mjs';
-import {
     deployActionNeedsSigner,
+    normalizeKeystorePathForForge,
+    maybePrimeSingleUnlock,
     primeDeployerPrivateKey,
     readConfiguredKeystorePath,
+    readKeystoreJsonObject,
+    readSingleUnlockEnabled,
     resetDeployerUnlockCache,
+    resolveDeployerIdentity,
     unlockDeployerWalletOnce,
 } from './deployer-unlock.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 test.afterEach(() => {
     resetDeployerUnlockCache();
-    resetOmnixDeployerUnlockCache();
 });
 
 test('buildForgeScriptArgs binds sender and private key for broadcast signing', () => {
@@ -44,7 +47,7 @@ test('buildForgeScriptArgs binds sender and private key for broadcast signing', 
 
 test('buildForgeScriptArgs prefers keystore signing without exposing private key', () => {
     const args = buildForgeScriptArgs('script/Deploy.s.sol', {
-        keystorePath: '/Users/maning/.keystore/keystore-0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A.json',
+        keystorePath: '/tmp/keystore-0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A.json',
         rpcUrl: 'https://bsc-dataseed.binance.org',
         sender: '0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A',
         extraArgs: ['--sig', 'run()'],
@@ -59,16 +62,51 @@ test('buildForgeScriptArgs prefers keystore signing without exposing private key
         '--sender',
         '0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A',
         '--keystore',
-        '/Users/maning/.keystore/keystore-0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A.json',
+        '/tmp/keystore-0xC8d52A5245aF5F2B095223F0Cd7468A7E670F22A.json',
         '--sig',
         'run()',
     ]);
 });
 
+test('double-encoded keystore JSON is readable and normalized for forge', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-keystore-'));
+    const keystorePath = path.join(tempDir, 'wrapped-keystore.json');
+    const cacheDir = path.join(tempDir, 'cache');
+    const wallet = ethers.Wallet.createRandom();
+    const keystore = {
+        address: wallet.address.slice(2).toLowerCase(),
+        version: 3,
+        crypto: {
+            cipher: 'aes-128-ctr',
+            cipherparams: { iv: '00'.repeat(16) },
+            ciphertext: '00'.repeat(32),
+            kdf: 'scrypt',
+            kdfparams: { salt: '11'.repeat(32), n: 2, dklen: 32, p: 1, r: 8 },
+            mac: '22'.repeat(32),
+        },
+    };
+    fs.writeFileSync(keystorePath, JSON.stringify(JSON.stringify(keystore)));
+
+    const parsed = readKeystoreJsonObject(keystorePath);
+    const identity = await resolveDeployerIdentity({
+        env: { AUTH_DEPLOY_KEYSTORE_PATH: keystorePath },
+    });
+    const normalized = normalizeKeystorePathForForge(keystorePath, { cacheDir });
+
+    assert.equal(parsed.wasJsonString, true);
+    assert.equal(identity.address, wallet.address);
+    assert.equal(normalized.normalized, true);
+    assert.equal(normalized.keystorePath.startsWith(cacheDir), true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(normalized.keystorePath, 'utf8')), keystore);
+    assert.equal((fs.statSync(normalized.keystorePath).mode & 0o777), 0o600);
+});
+
 test('deployActionNeedsSigner only unlocks for deploy actions', () => {
     assert.equal(deployActionNeedsSigner('deploy'), true);
+    assert.equal(deployActionNeedsSigner('deploy-implementation'), true);
     assert.equal(deployActionNeedsSigner('upgrade-and-migrate'), true);
     assert.equal(deployActionNeedsSigner('set-executor'), true);
+    assert.equal(deployActionNeedsSigner('setup-topic-expiry'), true);
     assert.equal(deployActionNeedsSigner('verify'), false);
     assert.equal(deployActionNeedsSigner('wallet-address'), false);
 });
@@ -140,29 +178,51 @@ test('keystore path remains higher priority than direct private key when both ar
     assert.equal(unlocked.address, keystoreWallet.address);
 });
 
-test('auth and osw deployers resolve the same address from the same keystore', async () => {
-    const sharedWallet = ethers.Wallet.createRandom();
-    const authEnv = {
-        OMNIX_DEPLOY_KEYSTORE_PATH: '/tmp/shared-keystore.json',
+test('single unlock decrypts keystore once and primes private key env', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-keystore-'));
+    const wallet = ethers.Wallet.createRandom();
+    const keystorePath = path.join(tempDir, 'keystore.json');
+    fs.writeFileSync(keystorePath, JSON.stringify(await wallet.encrypt('pw')));
+    const env = {
+        AUTH_SINGLE_UNLOCK: 'true',
+        AUTH_DEPLOY_KEYSTORE_PATH: keystorePath,
     };
-    const oswEnv = {
-        OMNIX_DEPLOY_KEYSTORE_PATH: '/tmp/shared-keystore.json',
-    };
+    let passwordReads = 0;
 
-    const authPrimed = await primeDeployerPrivateKey({
+    const result = await maybePrimeSingleUnlock({
         action: 'deploy',
-        env: authEnv,
-        loadWalletFromKeystore: async () => sharedWallet,
-        log: () => {},
-    });
-    const oswPrimed = await primeOmnixDeployerPrivateKey({
-        action: 'all',
-        env: oswEnv,
-        loadWalletFromKeystore: async () => sharedWallet,
+        env,
+        readPassword: () => {
+            passwordReads += 1;
+            return 'pw';
+        },
         log: () => {},
     });
 
-    assert.equal(authPrimed.address, sharedWallet.address);
-    assert.equal(oswPrimed.address, sharedWallet.address);
-    assert.equal(authPrimed.address, oswPrimed.address);
+    assert.equal(readSingleUnlockEnabled(env), true);
+    assert.equal(result.primed, true);
+    assert.equal(result.address, wallet.address);
+    assert.equal(env.AUTH_DEPLOY_PRIVATE_KEY, wallet.privateKey);
+    assert.equal(passwordReads, 1);
+});
+
+test('single unlock stays disabled unless explicitly enabled', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const env = {
+        AUTH_DEPLOY_KEYSTORE_PATH: '/tmp/deployer.json',
+    };
+    const result = await maybePrimeSingleUnlock({
+        action: 'deploy',
+        env,
+        readPassword: () => {
+            throw new Error('password should not be read');
+        },
+        log: () => {},
+    });
+
+    assert.equal(readSingleUnlockEnabled(env), false);
+    assert.equal(result.primed, false);
+    assert.equal(result.reason, 'single-unlock-disabled');
+    assert.equal(env.AUTH_DEPLOY_PRIVATE_KEY, undefined);
+    assert.ok(wallet.address);
 });

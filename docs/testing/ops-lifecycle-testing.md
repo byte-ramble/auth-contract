@@ -25,10 +25,10 @@
 | S7 回滚演练 | 升级失败后的回退流程 | 当前以 runbook + 手工演练为主 | `../operations/runbook.md` |
 
 ## 4. 建议执行顺序
-1. 本地门禁：`npm run -w @omniarb/auth-contract test`
-2. 生命周期专项：`npm run -w @omniarb/auth-contract test:lifecycle`
-3. 安全门禁：`npm run -w @omniarb/auth-contract check:security`（已包含 `test:lifecycle`）
-4. 若有 RPC：`BSC_RPC_URL=<RPC> npm run -w @omniarb/auth-contract test:fork`
+1. 本地门禁：`npm run test`
+2. 生命周期专项：`npm run test:lifecycle`
+3. 安全门禁：`npm run check:security`（已包含 `test:lifecycle`）
+4. 若有 RPC：`BSC_RPC_URL=<RPC> npm run test:fork`
 5. 预发布演练：按 `../operations/runbook.md` 跑一遍部署与升级流程。
 
 ## 5. 覆盖边界说明

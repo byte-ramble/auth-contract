@@ -28,11 +28,11 @@
 - 可选环境变量：
   - `BSC_RPC_URL`（发布前执行真实链上 fork 验证时）
 - 推荐前置检查：
-  - `npm run -w @omniarb/auth-contract fmt:check`
-  - `npm run -w @omniarb/auth-contract test`
-  - `npm run -w @omniarb/auth-contract check:security`
-  - `npm run -w @omniarb/auth-contract ci`
-  - `npm run -w @omniarb/auth-contract test:lifecycle`
+  - `npm run fmt:check`
+  - `npm run test`
+  - `npm run check:security`
+  - `npm run ci`
+  - `npm run test:lifecycle`
 
 ## 4. 首次部署 Runbook
 1. 部署 proxy + implementation：
@@ -42,7 +42,7 @@
    - 关键环境变量：
      - `PROXY_ADDRESS`
      - `CONFIGURE_BSC_PAYMENT_TOKENS=true|false`（默认 `true`）
-     - `RAMBLE_DISCOUNT_BPS=9000`（默认 9 折）
+     - `RAMBLE_DISCOUNT_BPS`（可选；不填则保留当前链上值，合约初始化默认 9000 即 9 折）
      - `GLOBAL_TRIAL_ENDS_AT`
      - `TOPIC_TRIAL_KEYS=topic.a,topic.b`
      - `TOPIC_TRIAL_ENDS_ATS=1735689600,1738291200`
@@ -76,6 +76,27 @@
    - topic/expiry/whitelist/trial/payment token 状态保持
    - `hasAccess`、`topup`、`quote` 正常
    - `owner`、`executor` 权限边界不变
+
+## 5.1 会员支付交易准备（owner / 多签）
+用于给 owner 或 Safe Transaction Builder 准备 WETH、USDT、USDC、WBNB、BTCB、RAMBLE 支付相关交易。
+
+1. 生成当前所需交易：
+   - `npm run prepare:membership-payments`
+   - 输出默认写入 `deployments/prepared/membership-payments-bsc.json`
+2. 如果输出提示当前 proxy 不支持 annual quote/topup：
+   - 先部署 implementation：`npm run deploy:implementation`
+   - 读取输出的 `pendingImplementation`
+   - 重新生成包含升级交易的批次：`NEW_IMPLEMENTATION=<pendingImplementation> npm run prepare:membership-payments`
+3. 交易语义：
+   - `upgradeToAndCall(newImplementation, 0x)`（仅在当前版本缺 annual 方法且提供 `NEW_IMPLEMENTATION` 时生成）
+   - `setOracleConfig(BNB_USD_ORACLE, MAX_ORACLE_DELAY)`（仅当前配置不匹配时生成）
+   - `setPaymentToken(WETH, true, ETH/USD)`
+   - `setPaymentToken(USDT, true, USDT/USD)`
+   - `setPaymentToken(USDC, true, USDC/USD)`
+   - `setPaymentToken(WBNB, true, BNB/USD)`
+   - `setPaymentToken(BTCB, true, BTC/USD)`
+   - `setRamblePair(RAMBLE_WBNB_PAIR)`（仅当前 Pair 不匹配时生成）
+   - 若某 topic 已启用 payment allowlist，脚本会补齐对应 topic 的 WETH/USDT/USDC/WBNB/BTCB/RAMBLE allowlist 交易。
 
 ## 6. 升级+迁移 Runbook（旧版推荐）
 适用：从旧版本升级到当前版本，并自动迁移旧 `_usdc/_usdt` 为新稳定币注册。
@@ -172,7 +193,7 @@ cast call <TOKEN_ADDRESS> "balanceOf(address)" <PROXY_ADDRESS> --rpc-url <BSC_RP
   - RAMBLE Pair 储备是否异常下降
   - 合约余额与提取日志对账
 - 发布前建议：
-  - `BSC_RPC_URL=<RPC> npm run -w @omniarb/auth-contract test:fork`
+  - `BSC_RPC_URL=<RPC> npm run test:fork`
   - 若本机 Foundry 在 macOS 上因系统代理崩溃，改用 Linux CI 或无代理 shell 执行真实 fork
 - 应急措施：
   - 异常时 owner 执行 `pause()`

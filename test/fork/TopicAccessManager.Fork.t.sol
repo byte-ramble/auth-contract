@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
 import "../../src/TopicAccessManagerUpgradeable.sol";
 import "../../src/mocks/TestERC1967Proxy.sol";
 import "../base/TestBase.sol";
@@ -17,7 +15,7 @@ contract TopicAccessManagerForkTest is TestBase {
     address private constant BTCB = 0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c;
 
     address private constant BNB_USD_ORACLE = 0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE;
-    address private constant ETH_USD_ORACLE = 0x9Ef1b8c0ED50Be8Bfa6025dA7D6f9A3c8cd9C89B;
+    address private constant ETH_USD_ORACLE = 0x9ef1B8c0E4F7dc8bF5719Ea496883DC6401d5b2e;
     address private constant BTC_USD_ORACLE = 0x264990fbd0A4796A3E3d8E37C4d5F87a3aCa5Ebf;
     address private constant USDT_USD_ORACLE = 0xB97Ad0E74fa7d920791E90258A6E2085088b4320;
     address private constant USDC_USD_ORACLE = 0x51597f405303C4377E36123cBc172b13269EA163;
@@ -67,12 +65,12 @@ contract TopicAccessManagerForkTest is TestBase {
         _assertQuoteCoversTopicPrice(BTCB);
     }
 
-    function testBscForkTopicTrialBlocksThenAllowsRealWethTopup() external {
+    function testBscForkTopicTrialBlocksThenAllowsRealBnbTopup() external {
         if (address(manager) == address(0)) {
             return;
         }
 
-        uint256 trialEndsAt = block.timestamp + 1 days;
+        uint256 trialEndsAt = block.timestamp + 1;
 
         vm.prank(owner);
         manager.setTopicTrialEndsAt(TOPIC_ID, trialEndsAt);
@@ -89,17 +87,14 @@ contract TopicAccessManagerForkTest is TestBase {
 
         vm.warp(trialEndsAt + 1);
 
-        uint256 minQuote = manager.quoteMinTokenForOneMonth(TOPIC_ID, WETH);
-        vm.deal(WETH, user, minQuote, true);
-
-        vm.prank(user);
-        IERC20(WETH).approve(address(manager), minQuote);
-
+        uint256 minQuote = manager.quoteMinBnbForOneMonth(TOPIC_ID);
         uint256 minEffectiveValueWad = manager.getTopicPriceWad(TOPIC_ID);
         vm.prank(user);
-        uint256 newExpiry = manager.topup(TOPIC_ID, WETH, minQuote, user, minEffectiveValueWad, block.timestamp);
+        uint256 newExpiry = manager.topup{ value: minQuote }(
+            TOPIC_ID, address(0), minQuote, user, minEffectiveValueWad, block.timestamp
+        );
 
-        assertGte(newExpiry, block.timestamp + ONE_MONTH, "real WETH topup should extend expiry");
+        assertGte(newExpiry, block.timestamp + ONE_MONTH, "real BNB topup should extend expiry");
     }
 
     function _assertQuoteCoversTopicPrice(

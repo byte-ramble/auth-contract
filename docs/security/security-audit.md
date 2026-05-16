@@ -112,9 +112,9 @@
 
 ## 5. 回归验证
 - `forge test --offline -vv`：`85` passed, `0` failed
-- `npm run -w @omniarb/auth-contract check:security`：通过（含 `test:lifecycle`）
+- `npm run check:security`：通过（含 `test:lifecycle`）
 - `forge coverage --offline --report summary`：通过
-- `npm run -w @omniarb/auth-contract fmt:check`：通过
+- `npm run fmt:check`：通过
 - `npm run ci`：通过（含 `fmt/build/test/coverage`）
 - `BSC_RPC_URL=<RPC> forge test --match-path "test/fork/*.t.sol"`：当前仓库已有真实 BSC fork 用例；若本机受 Foundry/macOS 网络环境影响，建议转 Linux CI 或无代理 shell 执行
 

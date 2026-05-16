@@ -1,18 +1,20 @@
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import dotenv from 'dotenv';
 import {
     readCleanValue,
     readConfiguredDeployPrivateKey,
     readConfiguredKeystorePath,
+    normalizeKeystorePathForForge,
     resolveDeployerIdentity,
+    maybePrimeSingleUnlock,
 } from './deployer-unlock.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const MONOREPO_ROOT = path.resolve(PROJECT_ROOT, '../../..');
 
 const BSC_MAINNET_CHAIN_ID = 56;
 const BSC_TESTNET_CHAIN_ID = 97;
@@ -31,15 +33,18 @@ let cachedResolvedNetwork = null;
 // ---------------------------------------------------------------------------
 
 export async function loadEnv() {
-    const dotenvPath = path.join(MONOREPO_ROOT, 'node_modules', 'dotenv', 'lib', 'main.js');
-    if (!fs.existsSync(dotenvPath)) {
-        throw new Error(`dotenv not found at ${dotenvPath}`);
-    }
-    const dotenv = await import(pathToFileURL(dotenvPath).href);
-
-    // Project .env first, then monorepo root as fallback
     dotenv.config({ path: path.join(PROJECT_ROOT, '.env') });
-    dotenv.config({ path: path.join(MONOREPO_ROOT, '.env') });
+}
+
+export async function primeSingleUnlockForAction(action) {
+    const result = await maybePrimeSingleUnlock({ action, env: process.env });
+    if (result.primed) {
+        process.env.AUTH_DEPLOY_KEYSTORE_PATH = '';
+        process.env.DEPLOY_KEYSTORE_PATH = '';
+        process.env.OMNIX_DEPLOY_KEYSTORE_PATH = '';
+        console.log('[deploy] single-unlock enabled; subsequent forge scripts will reuse the unlocked deployer key');
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +171,21 @@ function redactForgeArgsForLog(args) {
 }
 
 export function runForgeScript(scriptPath, { privateKey, keystorePath, rpcUrl, sender, extraArgs = [], dryRun = false }) {
-    const args = buildForgeScriptArgs(scriptPath, { privateKey, keystorePath, rpcUrl, sender, extraArgs });
+    const forgeKeystore = keystorePath
+        ? normalizeKeystorePathForForge(keystorePath, {
+            cacheDir: path.join(PROJECT_ROOT, 'cache', 'normalized-keystores'),
+        })
+        : { keystorePath: undefined, normalized: false };
+    if (forgeKeystore.normalized) {
+        console.log(`[deploy] normalized double-encoded keystore for forge: ${forgeKeystore.keystorePath}`);
+    }
+    const args = buildForgeScriptArgs(scriptPath, {
+        privateKey,
+        keystorePath: forgeKeystore.keystorePath,
+        rpcUrl,
+        sender,
+        extraArgs,
+    });
 
     // Log command without sensitive data
     const cmd = ['forge', ...redactForgeArgsForLog(args)].join(' ');
